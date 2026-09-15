@@ -1,0 +1,61 @@
+name: vespers-development
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: infra/backend.Dockerfile
+  environment: &environment
+    VESPERS_ENVIRONMENT: development
+    VESPERS_DATABASE_URL: postgresql+psycopg://vespers_app:local_app_only@postgres:5432/vespers_development
+    VESPERS_DBOS_SYSTEM_DATABASE_URL: postgresql+psycopg://vespers_dbos:local_dbos_only@postgres:5432/vespers_dbos_development
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_PASSWORD: local_admin_only
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+  api:
+    <<: *backend
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  worker:
+    <<: *backend
+    command: ["python", "-m", "backend.workflows.worker"]
+  dashboard:
+    build: ./apps/dashboard
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+volumes:
+  postgres_data:

@@ -1,0 +1,25 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+      - run: make install
+      - run: make check
+      - run: npm run build --prefix apps/dashboard
+      - run: docker compose config --quiet
+      - run: docker compose up --build -d --wait postgres api dashboard worker
+      - run: docker compose run --rm worker python -m backend.workflows.worker --smoke
+      - if: failure()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
