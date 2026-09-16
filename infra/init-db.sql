@@ -10,7 +10,6 @@ GRANT CONNECT ON DATABASE vespers_development TO vespers_app;
 \connect vespers_development
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO vespers_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE vespers_owner IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO vespers_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE vespers_owner IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO vespers_app;
+-- No default privileges: a new migration-owned table grants the runtime role
+-- nothing until a migration grants it explicitly. Migration 0003 revokes the
+-- same defaults on databases initialized before this change.

@@ -11,6 +11,19 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+CHECKS = Path(__file__).resolve().parent / "checks"
+# Synthetic, non-credential value used only to probe serialization boundaries.
+ADAPTER_SENTINEL = "synthetic-adapter-key-do-not-persist"
+# A cold runner builds images and installs packages before the 180s readiness wait.
+COLD_BUILD_TIMEOUT = 1800
+# Counts the phase-3 tenant tables in the APPLICATION database (not DBOS storage).
+APP_TABLE_COUNT = (
+    "import os, psycopg\n"
+    'c=psycopg.connect(os.environ["VESPERS_DATABASE_URL"]'
+    '.replace("postgresql+psycopg:","postgresql:"))\n'
+    'print(c.execute("SELECT count(*) FROM pg_tables WHERE tablename IN '
+    "('users','tenants','memberships','signup_allowlist')\").fetchone()[0])\n"
+)
 
 
 def main() -> None:
@@ -37,7 +50,7 @@ def main() -> None:
                 runtime
                 | {
                     "VESPERS_RECOVERY_PROBE_ENABLED": "true",
-                    "VESPERS_ADAPTER_TEST_SECRET": "synthetic-adapter-key-do-not-persist",
+                    "VESPERS_ADAPTER_TEST_SECRET": ADAPTER_SENTINEL,
                 }
             )
             + "\n"
@@ -63,24 +76,56 @@ def main() -> None:
             str(override),
         ]
 
-        def dc(
-            *args: str, code: str | None = None, check: bool = True
-        ) -> subprocess.CompletedProcess[str]:
-            result = subprocess.run(
-                base + list(args), input=code, text=True, capture_output=True, timeout=300
+        def redact(text: str) -> str:
+            return re.sub(r"(?<=://)[^@\s]+@", "[redacted]@", text).replace(
+                ADAPTER_SENTINEL, "[sentinel]"
             )
+
+        def dc(
+            *args: str, code: str | None = None, check: bool = True, timeout: float = 300
+        ) -> subprocess.CompletedProcess[str]:
+            try:
+                result = subprocess.run(
+                    base + list(args), input=code, text=True, capture_output=True, timeout=timeout
+                )
+            except subprocess.TimeoutExpired:
+                # Distinguish a harness timeout from a real check failure; `finally` still cleans up.
+                raise RuntimeError(
+                    f"Integration command timed out after {timeout}s: {args[:3]}"
+                ) from None
             if check and result.returncode:
                 # Provider secrets are never present; still avoid raw process diagnostics.
                 raise RuntimeError(
                     f"Integration command failed: {args[:3]} (exit {result.returncode}): "
-                    + re.sub(r"(?<=://)[^@\s]+@", "[redacted]@", result.stderr[-2000:]).replace(
-                        "synthetic-adapter-key-do-not-persist", "[sentinel]"
-                    )
+                    + redact(result.stderr[-2000:])
                 )
             return result
 
-        def python(service: str, code: str) -> str:
-            return dc("exec", "-T", service, "python", "-", code=code).stdout.strip()
+        def python(service: str, code: str, *argv: str) -> str:
+            return dc("exec", "-T", service, "python", "-", *argv, code=code).stdout.strip()
+
+        def owner_sql(
+            sql: str, *variables: str, check: bool = True
+        ) -> subprocess.CompletedProcess[str]:
+            """Administrative path: migration owner, never runtime credentials."""
+            flags: list[str] = []
+            for variable in variables:
+                flags += ["-v", variable]
+            return dc(
+                "exec",
+                "-T",
+                "postgres",
+                "psql",
+                "-v",
+                "ON_ERROR_STOP=1",
+                *flags,
+                "-U",
+                "vespers_owner",
+                "-d",
+                "vespers_test",
+                code=sql,
+                check=check,
+            )
 
         def wait_for(check: object, description: str) -> None:
             from collections.abc import Callable
@@ -106,13 +151,21 @@ def main() -> None:
                 "api",
                 "dashboard",
                 "worker",
+                timeout=COLD_BUILD_TIMEOUT,
             )
             print("PASS full-stack startup", flush=True)
+            for service in ("api", "worker"):
+                python(
+                    service,
+                    "import os\n"
+                    'assert "VESPERS_MIGRATION_DATABASE_URL" not in os.environ, '
+                    '"migration credentials injected into a long-lived runtime service"\n',
+                )
+            print("PASS migration credentials absent from api and worker", flush=True)
             python(
                 "api",
                 """
 import os, urllib.request, psycopg
-assert "VESPERS_MIGRATION_DATABASE_URL" not in os.environ
 for url in ["http://localhost:8000/health/live", "http://localhost:8000/health/ready", "http://dashboard:3000/", "http://dashboard:3000/api/health"]:
  assert urllib.request.urlopen(url,timeout=3).status == 200
 """,
@@ -133,6 +186,9 @@ CREATE TABLE public.privilege_probe (id integer);
 INSERT INTO public.privilege_probe VALUES (1);
 ALTER TABLE public.privilege_probe ENABLE ROW LEVEL SECURITY;
 CREATE POLICY deny_all ON public.privilege_probe USING (false);
+-- Explicit since migration 0003 removed the permissive default privileges.
+-- This probe must test the RLS policy, not the absence of a grant.
+GRANT SELECT ON public.privilege_probe TO vespers_app;
 """,
             )
             python(
@@ -153,6 +209,95 @@ with psycopg.connect(url, autocommit=True) as c:
 """,
             )
             print("PASS actual runtime role RLS and privilege denials", flush=True)
+
+            # ---- Tenant foundations: PostgreSQL-enforced isolation ----------
+            isolation = (CHECKS / "tenant_isolation.py").read_text()
+            allowlist = (ROOT / "infra/allowlist-add.sql").read_text()
+            for email in ("tenant-a@synthetic.invalid", "tenant-b@synthetic.invalid"):
+                owner_sql(allowlist, f"email={email}", "note=synthetic isolation test")
+            print("PASS administrative allowlist provisioning (owner only)", flush=True)
+
+            report = python("api", isolation, "provision")
+            marker = [line for line in report.splitlines() if line.startswith("IDS ")]
+            assert marker, report
+            ids = marker[-1][4:]
+            print("\n".join(x for x in report.splitlines() if not x.startswith("IDS ")), flush=True)
+
+            # A second membership for user A in tenant B, applied out of band.
+            owner_sql(
+                """
+INSERT INTO public.memberships (user_id, tenant_id, role)
+SELECT ua.id, tb.id, 'member'
+  FROM public.users ua, public.tenants tb
+ WHERE ua.email_normalized = 'tenant-a@synthetic.invalid'
+   AND tb.kind = 'personal'
+   AND tb.owner_user_id = (
+       SELECT id FROM public.users WHERE email_normalized = 'tenant-b@synthetic.invalid')
+ON CONFLICT DO NOTHING;
+"""
+            )
+            print(python("api", isolation, "shared", ids), flush=True)
+
+            # Disable one membership, one identity, and one tenant.
+            owner_sql(
+                """
+UPDATE public.memberships m SET status = 'disabled'
+  FROM public.users u, public.tenants t
+ WHERE m.user_id = u.id AND m.tenant_id = t.id
+   AND u.email_normalized = 'tenant-a@synthetic.invalid' AND t.owner_user_id = u.id;
+UPDATE public.tenants SET status = 'disabled'
+ WHERE owner_user_id = (
+   SELECT id FROM public.users WHERE email_normalized = 'tenant-b@synthetic.invalid');
+UPDATE public.users SET status = 'disabled'
+ WHERE email_normalized = 'tenant-b@synthetic.invalid';
+"""
+            )
+            print(python("api", isolation, "disabled", ids), flush=True)
+            print("PASS tenant isolation enforced by PostgreSQL", flush=True)
+
+            # ---- Identity binding and opt-in grants (migration 0003) --------
+            binding = (CHECKS / "identity_binding.py").read_text()
+            allowlist = (ROOT / "infra/allowlist-add.sql").read_text()
+            for email in (
+                "alice@synthetic.invalid",
+                "bob@synthetic.invalid",
+                "alice.new@synthetic.invalid",
+                "legacy@synthetic.invalid",
+            ):
+                owner_sql(allowlist, f"email={email}", "note=synthetic identity binding")
+            # A table created by the migration owner AFTER 0003 must grant nothing.
+            owner_sql("CREATE TABLE public.privilege_probe_new (id integer);")
+            print(python("api", binding, "all"), flush=True)
+            print("PASS identity binding and opt-in default grants", flush=True)
+
+            # ---- Subject binding and revocation (migration 0004) ------------
+            # Every state change below is applied with the MIGRATION OWNER, from
+            # here rather than inside the api container, so the assertion that
+            # api/worker never hold migration credentials still holds.
+            owner_sql("INSERT INTO public.users (email) VALUES ('legacy@synthetic.invalid');")
+            print(python("api", binding, "unbound"), flush=True)
+            # The documented administrative procedure itself, not a hand-written
+            # UPDATE: these instructions appear in the README, so they are run.
+            bind = (ROOT / "infra/bind-subject.sql").read_text()
+            owner_sql(bind, "email=legacy@synthetic.invalid", "subject=workos_legacy")
+            print(python("api", binding, "bound"), flush=True)
+            # Re-running it must refuse rather than rebind a live account.
+            rebind = owner_sql(
+                bind, "email=legacy@synthetic.invalid", "subject=workos_other", check=False
+            )
+            assert rebind.returncode != 0, rebind.stdout
+            assert "refusing to rebind" in rebind.stderr, rebind.stderr
+            print("  ok administrative binding refuses to rebind a live account", flush=True)
+            owner_sql(
+                """
+DELETE FROM public.signup_allowlist WHERE email_normalized = 'legacy@synthetic.invalid';
+UPDATE public.tenants SET status = 'disabled'
+ WHERE owner_user_id = (
+   SELECT id FROM public.users WHERE email_normalized = 'legacy@synthetic.invalid');
+"""
+            )
+            print(python("api", binding, "revoked"), flush=True)
+            print("PASS verified-subject requirement and access revocation", flush=True)
             # Reproduce the old development ownership in a disposable database.
             dc(
                 "exec",
@@ -224,10 +369,12 @@ client=DBOSClient(system_database_url=url)
 client.enqueue({"workflow_name":"recovery_workflow", "queue_name":"vespers-recovery-probe", "workflow_id":"interrupted", "app_version":"scaffold-v2"}, "interrupted")
 """,
             )
-            query_prefix = """
-import os, psycopg
-c=psycopg.connect(os.environ["VESPERS_DBOS_SYSTEM_DATABASE_URL"].replace("postgresql+psycopg:","postgresql:"))
-"""
+            query_prefix = (
+                "import os, psycopg\n"
+                f"SENTINEL={ADAPTER_SENTINEL!r}\n"
+                'c=psycopg.connect(os.environ["VESPERS_DBOS_SYSTEM_DATABASE_URL"]'
+                '.replace("postgresql+psycopg:","postgresql:"))\n'
+            )
             wait_for(
                 lambda: (
                     python(
@@ -369,7 +516,7 @@ from dbos import DBOSClient
 client=DBOSClient(system_database_url=os.environ["VESPERS_DBOS_SYSTEM_DATABASE_URL"])
 assert client.retrieve_workflow('adapter').get_result() == '42'
 # Inspect serialized storage without deserializing pickle into executable objects.
-secret=b'synthetic-adapter-key-do-not-persist'
+secret=SENTINEL.encode()
 for table in ['workflow_status','operation_outputs']:
  for (record,) in c.execute('SELECT row_to_json(t)::text FROM dbos.'+table+' t'):
   assert secret not in record.encode()
@@ -383,7 +530,7 @@ print(json.dumps(dict(rows)))
             )
             log_result = dc("logs", "worker")
             logs = log_result.stdout + log_result.stderr
-            assert "synthetic-adapter-key-do-not-persist" not in logs
+            assert ADAPTER_SENTINEL not in logs
             print(
                 "PASS Pydantic AI adapter recovery and scoped serialization: " + counts, flush=True
             )
@@ -427,6 +574,24 @@ else: raise AssertionError("readiness ignored outage")
                 "readiness did not recover after outage",
             )
             print("PASS negative readiness, outage and reconnection", flush=True)
+
+            dc("run", "--rm", "migrate", "alembic", "downgrade", "0001")
+            assert (
+                python(
+                    "api",
+                    APP_TABLE_COUNT,
+                )
+                == "0"
+            )
+            dc("run", "--rm", "migrate", "alembic", "upgrade", "head")
+            assert (
+                python(
+                    "api",
+                    APP_TABLE_COUNT,
+                )
+                == "4"
+            )
+            print("PASS baseline-to-head migration round trip on disposable storage", flush=True)
         finally:
             dc("down", "-v", "--remove-orphans")
             print("Removed disposable project " + project, flush=True)

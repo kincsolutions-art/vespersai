@@ -86,36 +86,113 @@ Gate: local stack startup and test workflow execution verified. Phase 2 remains 
 
 ## 3. Define data ownership and persistence
 
-- [ ] Create users, tenants, memberships, and signup allowlist tables. Start with personal tenants but keep users and tenants distinct.
+- [x] Create users, tenants, memberships, and signup allowlist tables. Start with personal tenants but keep users and tenants distinct.
 - [ ] Create Telegram links and single-use linking token tables.
 - [ ] Create credential references, model settings, and connected-account records.
 - [ ] Create conversations, messages, tasks, task events, action records, and outbox records.
 - [ ] Create schedules, schedule occurrences, preferences, memory facts, activity signals, suggestions, feedback, and usage/budget records.
-- [ ] Put tenant ownership on every tenant-owned record and scope uniqueness/foreign keys appropriately.
-- [ ] Implement tenant-scoped repositories and row-level security on application tables.
-- [ ] Ensure application database roles do not bypass tenant policies; set tenant context transactionally for pooled connections.
-- [ ] Keep DBOS system storage and permissions separate from application tables. Do not impose application RLS assumptions on DBOS internals.
+- [x] Put tenant ownership on every tenant-owned record and scope uniqueness/foreign keys appropriately. Applies to the four foundation tables only; `users` and `signup_allowlist` are deliberately global.
+- [x] Implement tenant-scoped repositories and row-level security on application tables. Covers the foundation tables; every later product table must repeat the revoke/re-grant and policy work.
+- [x] Ensure application database roles do not bypass tenant policies; set tenant context transactionally for pooled connections.
+- [x] Keep DBOS system storage and permissions separate from application tables. Do not impose application RLS assumptions on DBOS internals.
 - [ ] Namespace caches, artifacts, and tool discovery results by tenant and credential identity where applicable.
 - [ ] Define retention, account deletion, credential revocation, and backup retention behavior.
 - [ ] Define deletion behavior for derived summaries and memory as well as original records.
 
 Gate: synthetic tenant A cannot access tenant B through repository calls, APIs, guessed IDs, or background jobs.
 
+Tenant foundations (2026-09-16):
+
+Migration `0002_tenant_foundations` adds `users`, `tenants`, `memberships` and
+`signup_allowlist` with fail-closed row-level security, a transaction-local tenant
+context, five narrowly scoped bootstrap functions, and least-privilege runtime
+grants. The full access matrix, the bootstrap trust boundary and the FORCE RLS
+decision record are in [tenant foundations](docs/tenant-foundations.md).
+
+| Check | Result | Limitation |
+| --- | --- | --- |
+| Offline tests | 58 pass (37 previous + 21 new) | Python-side guards only; no database |
+| Isolated PostgreSQL isolation suite | Pass, as `vespers_app` | Two synthetic tenants plus one shared-membership case |
+| Direct SQL and repository checks | Pass | Both used, so application filtering cannot mask a broken policy |
+| Migration downgrade and re-upgrade | Pass | Disposable storage only |
+| Existing recovery regressions | Pass, unchanged | Adapter counters still 1/1/2 |
+
+The phase gate is met for the foundation tables. It is **not** met for the
+product tables that do not exist yet: Telegram links, credential references,
+conversations, tasks, outbox, schedules, memory, suggestions and usage records
+all remain unimplemented, and each must carry its own tenant ownership, policies
+and grants. Retention, account deletion and derived-summary deletion behaviour
+are still undefined. Authentication is not wired: `external_id` is present but no
+verified identity adapter populates it, and the allowlist is provisioned only
+through the administrative path.
+
+Unchanged by this batch: Gemini generation compatibility remains **unverified**
+after two upstream HTTP 504 responses, Composio live actions remain deferred
+until onboarding UI, remote CI remains unobserved, and production provisioning
+remains outstanding. Phase 2 stays incomplete.
+
 ## 4. Authentication and onboarding
 
-Selected authentication component: WorkOS AuthKit. This is a design decision; integration is not implemented. Complete the phase 3 tenant foundations before wiring authentication to application access. WorkOS sign-in does not replace backend allowlist enforcement or local tenant authorization.
+Selected authentication component: WorkOS AuthKit. Sign-in, callback, session handling, logout and backend enforcement are implemented against the phase 3 tenant foundations. WorkOS sign-in does not replace backend allowlist enforcement or local tenant authorization.
 
-- [ ] Configure WorkOS AuthKit for the Next.js dashboard, with separate environment configuration and callback/logout URLs; pin and verify SDK versions during implementation.
-- [ ] Implement verified-email authentication using WorkOS AuthKit.
-- [ ] Validate authentication server-side in FastAPI and resolve the authenticated WorkOS user to local users, tenants, and memberships; never trust client-supplied tenant identity.
-- [ ] Enforce the allowlist server-side, including direct signup API requests and WorkOS callback/session entry points; successful WorkOS sign-in alone must not grant application access.
-- [ ] Normalize email consistently without assuming provider-specific aliases.
-- [ ] Create user, tenant, and membership atomically; persist a unique WorkOS user mapping and handle duplicate callbacks safely.
-- [ ] Protect sessions and APIs with secure cookies, appropriate CSRF protection, rate limits, and authenticated membership checks.
+Authentication batch (2026-09-16):
+
+Next.js BFF holds a sealed HttpOnly session cookie; FastAPI independently validates
+the WorkOS access token against the client-scoped JWKS and resolves identity from
+the verified `sub`. Migration `0003` makes identity binding subject-first — a second
+subject presenting an existing verified email now fails closed instead of being
+handed that account — and replaces the permissive default table privileges with
+explicit opt-in grants. Full design in [authentication](docs/authentication.md).
+
+| Check | Result | Limitation |
+| --- | --- | --- |
+| Offline tests | 179 pass (129 previous + 50 new) | Synthetic identities and mocked WorkOS HTTP |
+| Token validation | Pass, real signatures | Keys generated locally; only the JWKS source is stubbed |
+| Dashboard redirect policy | Pass, 2 Node tests | Pure function coverage |
+| PostgreSQL identity binding | Pass, runtime role | Conflicts, email change, duplicates, concurrency |
+| Opt-in default grants | Pass | New owner-created table grants runtime nothing |
+| Baseline-to-head migration round trip | Pass | Disposable storage only |
+| Existing isolation and recovery regressions | Pass, unchanged | Adapter counters still 1/1/2 |
+
+Hardening batch (2026-09-16):
+
+Migration `0004` makes the verified external subject a **required** argument and
+removes first-subject adoption, closing the last runtime-callable way to resolve
+or claim an account from an email address alone. Administrative subject binding
+is separated into an owner-only script with no runtime grant. Application-access
+revocation is now enforced at the protected backend boundary on every request —
+allowlist, user status, tenant status and membership status — so an existing
+browser session cannot outlive revoked access. Token trust assumptions were
+checked against the pinned SDKs and current WorkOS documentation rather than
+assumed; see [authentication](docs/authentication.md#application-binding).
+
+| Check | Result | Limitation |
+| --- | --- | --- |
+| Subjectless provisioning refused | Pass, Python and SQL layers | Blank, whitespace, explicit NULL, and the dropped two-argument form |
+| Unbound row not adoptable | Pass, real PostgreSQL | Fails closed `VS003`; owner binding is the only path |
+| Revocation on an established session | Pass, 5 offline + 1 PostgreSQL stage | Allowlist, user, tenant, membership |
+| Issuer/audience/key-set binding | Pass, real signatures | Documented values; a live token is still required to confirm them |
+| Token-free operator access report | Pass, 14 offline tests | Reads the database only; no HTTP-layer coverage |
+
+**No live WorkOS check has been performed** — no development configuration is
+present (`.env.dashboard` absent, `VESPERS_WORKOS_*` unset), so every live item
+is *blocked*, not passed. Mocks establish our verification logic, not live
+compatibility; manual setup instructions are in the README. Token revocation
+remains unimplemented by design: revocation here is application access, and an
+already-issued access token stays cryptographically valid until it expires.
+
+- [x] Configure WorkOS AuthKit for the Next.js dashboard, with separate environment configuration and callback/logout URLs; pin and verify SDK versions during implementation. Pinned `@workos-inc/authkit-nextjs` 4.3.2 / `@workos-inc/node` 10.13.0; a real sign-in is still unverified pending manual setup.
+- [x] Implement verified-email authentication using WorkOS AuthKit. `email_verified` comes from the WorkOS Management API keyed by the verified `sub`, never from the browser.
+- [x] Validate authentication server-side in FastAPI and resolve the authenticated WorkOS user to local users, tenants, and memberships; never trust client-supplied tenant identity.
+- [x] Enforce the allowlist server-side, including direct signup API requests and WorkOS callback/session entry points; successful WorkOS sign-in alone must not grant application access.
+- [x] Normalize email consistently without assuming provider-specific aliases.
+- [x] Create user, tenant, and membership atomically; persist a unique WorkOS user mapping and handle duplicate callbacks safely.
+- [x] Protect sessions and APIs with secure cookies, appropriate CSRF protection, rate limits, and authenticated membership checks. Rate limiting is in-process only; see its documented scope.
+- [x] Re-check allowlist and local status at the protected backend boundary on every request, so revoked application access takes effect on the next call rather than at token expiry.
 - [ ] Persist onboarding progress across expired sessions and browser disconnects.
 - [ ] Collect timezone (Asia/Kathmandu initially), quiet hours, and user goals.
 - [ ] Define authenticated disconnect/relink and account deletion flows.
-- [ ] Make account disablement stop new work and prevent queued tasks from starting.
+- [ ] Make account disablement stop new work and prevent queued tasks from starting. Partially done: disablement is enforced at the API access boundary; there is no queued/running work to stop yet.
 
 ## 5. Credentials, BYOK, and models
 

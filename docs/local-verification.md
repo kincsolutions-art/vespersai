@@ -10,12 +10,43 @@ corrective requirements, never their values or original exception chain.
 Host development uses `.env` for API/worker and `.env.migrations` for Alembic.
 Copy the corresponding `.example` files. Do not export migration credentials into
 API/worker shells. Compose supplies `VESPERS_MIGRATION_DATABASE_URL` only to migrate.
-Runtime `vespers_app` has CONNECT, schema USAGE, table SELECT/INSERT/UPDATE/DELETE,
-and sequence USAGE/SELECT. It has no ownership, role membership, DDL, superuser,
-BYPASSRLS, or inheritance privileges. `vespers_owner` owns app objects; `vespers_dbos`
-owns only the separate DBOS database. No tenant product tables exist yet.
+Runtime `vespers_app` has CONNECT, schema USAGE, and the default-privilege table
+grants from `infra/init-db.sql`. It has no ownership, role membership, DDL,
+superuser, BYPASSRLS, or inheritance privileges. `vespers_owner` owns app objects;
+`vespers_dbos` owns only the separate DBOS database.
+
+Migration `0002` narrows this for the tenant foundations: it revokes the broad
+default-privilege DML and re-grants only SELECT on `users` and `memberships`,
+SELECT plus column-level `UPDATE (name, updated_at)` on `tenants`, nothing at all
+on `signup_allowlist`, and EXECUTE on the bootstrap functions (seven after
+migration `0004`: five SECURITY DEFINER, two SECURITY INVOKER). See
+[tenant foundations](tenant-foundations.md). Product tables beyond these four
+(tasks, schedules, credentials, memory, Telegram links) still do not exist.
 
 ## Existing development volume: non-destructive transition
+
+**When this is needed:** only for a development volume created before the
+migration owner existed, where `vespers_app` still owns the database. A volume
+created from the current `infra/init-db.sql` already has `vespers_owner` and must
+not run it.
+
+**When it must not run:** after migration `0002` has been applied. The script
+predates the tenant schema and its `GRANT ... ON ALL TABLES` would widen the
+deliberately narrow grants on `users`, `tenants`, `memberships` and
+`signup_allowlist`. It now refuses to run once `public.users` exists, so the
+guard is enforced rather than merely documented — but the ordering still matters:
+transition first, migrate second, never the reverse.
+
+To check which case applies, without changing anything:
+
+```sh
+docker compose exec -T postgres psql -U postgres -d vespers_development -tAc \
+  "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database();"
+docker compose exec -T postgres psql -U postgres -d vespers_development -tAc \
+  "SELECT to_regclass('public.users') IS NOT NULL;"
+```
+
+Owner `vespers_owner` or `users` already present → skip the transition entirely.
 
 The init script runs only on fresh volumes. Do not remove/reset an existing volume.
 For the original scaffold's local database and public development role names:
@@ -105,3 +136,71 @@ The harness resets development bind mounts only in its isolated override so test
 the built artifacts. Startup, role/RLS denials, legacy ownership transition twice,
 original resident recovery, adapter recovery, outage/readiness and reconnection passed.
 Only its disposable project was removed; no development database was migrated.
+
+## Tenant isolation harness (2026-09-16)
+
+`make integration` now also runs `tests/integration/checks/tenant_isolation.py`
+inside the api container as `vespers_app`, using direct SQL alongside the
+repository so that application-side filtering cannot conceal a broken policy.
+
+It asserts the runtime role is neither owner nor superuser and cannot bypass RLS;
+that the allowlist is unreadable and unwritable by runtime and eligibility flows
+only through `app.signup_allowed`; that an unallowlisted signup leaves no orphan
+rows; that duplicate and concurrent provisioning converge on one user, tenant and
+membership; that tenant A cannot list, read by guessed id, update or delete tenant
+B's rows; that ownership, id and status columns are unwritable; that missing,
+empty, malformed and unauthorized context all fail closed; that one connection
+serving A then B then no context leaks nothing, including on rollback and
+statement-error paths; that disabled memberships, identities and tenants are each
+rejected by access resolution; that runtime cannot alter policies, run DDL or
+assume the owner role; and that DBOS storage carries no application tables,
+policies or `app` schema.
+
+Fixtures that require owner rights (allowlist seeding, the second membership, and
+the disablements) are applied through `psql -U vespers_owner`, never with runtime
+credentials. The harness also runs `alembic downgrade -1` and `upgrade head`
+against the disposable database only.
+
+This proves database-enforced isolation for these four tables. It does not prove
+isolation for tables that do not exist yet, and it is not a defence against an
+attacker holding the runtime credentials with arbitrary SQL execution.
+
+## Authentication and default-grant checks (2026-09-16)
+
+`make integration` also runs `tests/integration/checks/identity_binding.py` inside
+the api container as `vespers_app`, covering migrations `0003` and `0004`:
+
+- two verified subjects provision two separate identities and tenants;
+- a duplicate callback for the same subject is idempotent;
+- **a second subject presenting an existing verified email fails closed and
+  creates nothing** — the defect `0003` fixes;
+- an upstream email change follows the subject without transferring ownership;
+- a known subject cannot claim an address already bound to another identity;
+- an unallowlisted subject is refused with no orphan rows;
+- four concurrent callbacks for one subject converge on a single identity;
+- membership listing returns only the requested user's active tenants;
+- **a table created by the migration owner after `0003` grants the runtime role
+  nothing**, while the explicit grants on the foundation tables survive;
+- **a missing or blank subject cannot authenticate, claim an account, or create
+  one** — refused by the Python guard, by an explicit NULL argument (SQLSTATE
+  22023), and by the dropped two-argument form, which no longer resolves to a
+  function at all;
+- **a user row with no bound subject fails closed** (`VS003`) instead of being
+  adopted by whoever presents its address;
+- administrative binding, applied by the migration owner, is what makes such a
+  row usable — signing in never does;
+- **removing an allowlist entry and disabling a tenant revoke access on the next
+  call**, with the account, user row and membership left intact.
+
+Every administrative state change in that last group is applied from the harness
+with the **migration owner**, not from inside the api container, so the assertion
+that `api` and `worker` never hold migration credentials still holds.
+
+The migration round trip now runs `alembic downgrade 0001` followed by
+`upgrade head`, so baseline-to-head is exercised rather than a single step.
+
+`infra/init-db.sql` no longer sets `ALTER DEFAULT PRIVILEGES`. The harness's own
+`privilege_probe` table therefore carries an explicit `GRANT SELECT`, so that
+probe keeps testing the RLS policy rather than the absence of a grant.
+
+No live WorkOS request is made anywhere in the harness.

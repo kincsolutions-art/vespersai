@@ -8,7 +8,9 @@ dependencies = [
     "composio==0.21.1",
     "dbos==2.31.1",
     "fastapi==0.141.1",
+    "httpx==0.28.1",
     "psycopg[binary]==3.3.5",
+    "pyjwt[crypto]==2.14.0",
     "pydantic-ai-slim[dbos,google]==2.43.0",
     "pydantic-settings==2.15.0",
     "sqlalchemy[asyncio]==2.0.53",
@@ -18,7 +20,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx==0.28.1",
     "mypy==2.3.1",
     "pytest==9.1.1",
     "ruff==0.16.7",

@@ -7,6 +7,11 @@ x-backend: &backend
     VESPERS_ENVIRONMENT: development
     VESPERS_DATABASE_URL: postgresql+psycopg://vespers_app:local_app_only@postgres:5432/vespers_development
     VESPERS_DBOS_SYSTEM_DATABASE_URL: postgresql+psycopg://vespers_dbos:local_dbos_only@postgres:5432/vespers_dbos_development
+    # Empty by default: protected routes fail closed, health checks keep working.
+    VESPERS_WORKOS_CLIENT_ID: ${VESPERS_WORKOS_CLIENT_ID:-}
+    VESPERS_WORKOS_API_KEY: ${VESPERS_WORKOS_API_KEY:-}
+    VESPERS_WORKOS_ISSUERS: ${VESPERS_WORKOS_ISSUERS:-["https://api.workos.com"]}
+    VESPERS_WORKOS_AUDIENCE: ${VESPERS_WORKOS_AUDIENCE:-}
   depends_on:
     postgres:
       condition: service_healthy
@@ -73,6 +78,14 @@ services:
     ports: ["127.0.0.1:3000:3000"]
     environment:
       NEXT_TELEMETRY_DISABLED: "1"
+      VESPERS_API_BASE_URL: http://api:8000
+      NEXT_PUBLIC_WORKOS_REDIRECT_URI: http://localhost:3000/auth/callback
+      VESPERS_ALLOWED_ORIGINS: http://localhost:3000
+    # Server-side only, and optional: without it the dashboard renders the
+    # "sign-in unavailable" state instead of failing to start.
+    env_file:
+      - path: .env.dashboard
+        required: false
     develop:
       watch:
         - path: ./apps/dashboard

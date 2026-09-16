@@ -5,6 +5,7 @@ from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from backend.config import MigrationSettings
+from backend.storage import models  # noqa: F401  (registers tables on Base.metadata)
 from backend.storage.base import Base
 
 

@@ -17,3 +17,4 @@ htmlcov/
 
 !.env.migrations.example
 !.env.spike.example
+!.env.dashboard.example

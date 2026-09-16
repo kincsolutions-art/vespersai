@@ -10,6 +10,7 @@ check:
 	npm run lint --prefix apps/dashboard
 	npm run typecheck --prefix apps/dashboard
 	npm run format:check --prefix apps/dashboard
+	npm test --prefix apps/dashboard
 format:
 	uv run ruff check --fix .
 	uv run ruff format .

@@ -116,3 +116,32 @@ footer {
     font-size: 10px;
   }
 }
+
+/* Authentication screens */
+.auth {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 4rem 1.5rem;
+}
+.auth dl {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) 1fr;
+  gap: 0.5rem 1.5rem;
+  margin: 2rem 0;
+}
+.auth dt {
+  opacity: 0.7;
+}
+.auth dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.auth code {
+  font-size: 0.9em;
+}
+.button {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  text-decoration: none;
+}

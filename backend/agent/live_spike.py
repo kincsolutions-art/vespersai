@@ -116,6 +116,16 @@ def failure(error: Exception) -> dict[str, Any]:
     }
 
 
+class SpikeCheckFailed(Exception):
+    """Compatibility assertion failure. Carries a fixed label, never provider content."""
+
+
+def require(condition: object, label: str) -> None:
+    """Explicit check that stays active under `python -O`, unlike `assert`."""
+    if not condition:
+        raise SpikeCheckFailed(label)
+
+
 class Answer(BaseModel):
     label: str
     total: int
@@ -137,14 +147,14 @@ async def gemini(settings: SpikeSettings, report: dict[str, Any]) -> None:
         try:
             if report.get("discovery") != "pass":
                 discovered = await provider.client.aio.models.get(model=MODEL)
-                assert discovered.name == f"models/{MODEL}"
+                require(discovered.name == f"models/{MODEL}", "discovery-model-mismatch")
                 report["discovery"] = "pass"
             config: ModelSettings = {"max_tokens": 2048, "temperature": 0, "timeout": 30}
             text_agent = Agent(model, retries=0, model_settings=config)
             text = await text_agent.run(
                 "Reply with exactly VESPERS_OK.", usage_limits=UsageLimits(request_limit=1)
             )
-            assert text.output.strip() == "VESPERS_OK"
+            require(text.output.strip() == "VESPERS_OK", "text-output-mismatch")
             report["text"] = "pass"
             executed = []
             tool_agent = Agent(model, retries=0, model_settings=config)
@@ -152,7 +162,7 @@ async def gemini(settings: SpikeSettings, report: dict[str, Any]) -> None:
             @tool_agent.tool_plain
             def synthetic_lookup(code: int) -> str:
                 """Return the synthetic verification token for code 17."""
-                assert code == 17
+                require(code == 17, "tool-argument-mismatch")
                 executed.append(code)
                 return "VESPERS_TOOL_731"
 
@@ -160,7 +170,8 @@ async def gemini(settings: SpikeSettings, report: dict[str, Any]) -> None:
                 "Call synthetic_lookup with code 17. Reply with exactly the returned token.",
                 usage_limits=UsageLimits(request_limit=3, tool_calls_limit=1),
             )
-            assert executed == [17] and result.output.strip() == "VESPERS_TOOL_731"
+            require(executed == [17], "tool-not-executed")
+            require(result.output.strip() == "VESPERS_TOOL_731", "tool-final-output-mismatch")
             report["tool_and_final"] = "pass"
             structured_agent = Agent(
                 model, output_type=NativeOutput(Answer), retries=0, model_settings=config
@@ -168,7 +179,10 @@ async def gemini(settings: SpikeSettings, report: dict[str, Any]) -> None:
             result2 = await structured_agent.run(
                 "Return label 'synthetic' and total 42.", usage_limits=UsageLimits(request_limit=1)
             )
-            assert result2.output == Answer(label="synthetic", total=42)
+            require(
+                result2.output == Answer(label="synthetic", total=42),
+                "structured-output-mismatch",
+            )
             report["structured"] = "pass"
             report["status"] = "pass"
         except Exception as error:

@@ -11,8 +11,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 from starlette.middleware.base import RequestResponseEndpoint
 
+from backend.api.account import router as account_router
+from backend.auth.ratelimit import FixedWindowLimiter
+from backend.auth.tokens import AccessTokenValidator
+from backend.auth.workos import WorkOSDirectory
 from backend.config import Settings, get_settings
 from backend.logging import configure_logging
+from backend.storage.session import create_sessionmaker
 
 logger = logging.getLogger("vespers.api")
 
@@ -24,7 +29,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         configure_logging(config.log_level)
         engine = create_async_engine(str(config.database_url), pool_pre_ping=True)
         app.state.engine = engine
+        app.state.settings = config
+        app.state.sessions = create_sessionmaker(engine)
+        app.state.auth_limiter = FixedWindowLimiter(config.auth_rate_limit_per_minute)
+        # Absent WorkOS configuration leaves these None, so protected routes fail
+        # closed with 503 while /health/live and offline tests keep working.
+        directory: WorkOSDirectory | None = None
+        if config.workos_configured:
+            app.state.token_validator = AccessTokenValidator(config)
+            directory = WorkOSDirectory(config)
+            app.state.workos_directory = directory
+        else:
+            app.state.token_validator = None
+            app.state.workos_directory = None
         yield
+        if directory is not None:
+            await directory.aclose()
         await engine.dispose()
 
     app = FastAPI(title="Vespers API", version="0.1.0", lifespan=lifespan)
@@ -45,6 +65,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
         return response
+
+    app.include_router(account_router)
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:

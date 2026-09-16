@@ -1,4 +1,9 @@
 import Image from "next/image";
+import Link from "next/link";
+import { withAuth } from "@workos-inc/authkit-nextjs";
+import { isConfigured } from "../lib/config";
+
+export const dynamic = "force-dynamic";
 const features = [
   ["01", "Your account", "Verified email and private access."],
   [
@@ -9,7 +14,9 @@ const features = [
   ["03", "Your Telegram", "Link your private chat with Vespers."],
   ["04", "Your apps", "Connect the tools you already use."],
 ];
-export default function Home() {
+export default async function Home() {
+  const configured = isConfigured();
+  const { user } = configured ? await withAuth() : { user: null };
   return (
     <main>
       <header>
@@ -21,6 +28,15 @@ export default function Home() {
         />
         <span>vespers</span>
         <span className="badge">In development</span>
+        {user ? (
+          <Link className="button" href="/account">
+            Account
+          </Link>
+        ) : configured ? (
+          <Link className="button" href="/auth/sign-in">
+            Sign in
+          </Link>
+        ) : null}
       </header>
       <section className="intro">
         <p className="eyebrow">A little less to keep track of</p>

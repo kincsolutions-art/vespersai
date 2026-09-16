@@ -65,6 +65,101 @@ class Settings(SafeSettings):
     encryption_key: SecretStr | None = None
     recovery_probe_enabled: bool = False
 
+    # --- WorkOS AuthKit -------------------------------------------------
+    # All optional: absent configuration must fail protected routes closed
+    # without breaking offline tests or liveness checks.
+    workos_client_id: str | None = None
+    workos_api_key: SecretStr | None = None
+    workos_api_base: str = "https://api.workos.com"
+    # Accepted `iss` values. WorkOS documents "https://api.workos.com/" in the
+    # AuthKit session guide and "https://api.workos.com" in the API reference, and
+    # states that the value changes when a custom auth domain is configured and
+    # should be read from configuration rather than hardcoded. Both spellings of
+    # one origin are accepted (see `workos_accepted_issuers`); a different origin
+    # is not.
+    workos_issuers: list[str] = ["https://api.workos.com"]
+    # AuthKit session access tokens carry no `aud` claim by default; the key set
+    # is per-client instead. WorkOS supports adding one through a JWT template,
+    # which is the documented way to bind a token to a specific API. Set this only
+    # when such a template is configured, or every live token is rejected.
+    workos_audience: str | None = None
+    # Explicit override for a custom auth domain whose key set is not served from
+    # `{workos_api_base}/sso/jwks/{client_id}`.
+    workos_jwks_url_override: str | None = None
+    workos_algorithms: list[str] = ["RS256"]
+    workos_leeway_seconds: int = 60
+    # Bounded in-process limiter for auth/provisioning routes.
+    auth_rate_limit_per_minute: int = 10
+
+    @field_validator("workos_audience", "workos_jwks_url_override", "workos_api_key", mode="before")
+    @classmethod
+    def blank_is_unset(cls, value: Any) -> Any:
+        """Compose supplies `VAR: ${VAR:-}` as an empty string, not as absent.
+
+        Without this, an unset audience would arrive as "" — which is not None,
+        so audience verification would switch on and reject every live token.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @property
+    def workos_configured(self) -> bool:
+        return bool(self.workos_client_id and self.workos_api_key)
+
+    @property
+    def workos_jwks_url(self) -> str:
+        """Client-scoped key set: `{base}/sso/jwks/{client_id}`.
+
+        Matches `@workos-inc/node` 10.13.0, whose `getJwksUrl(clientId)` returns
+        exactly `${baseURL}/sso/jwks/${clientId}`. WorkOS signs with a key set
+        unique to the client id, which is what stops another WorkOS application's
+        token from verifying here.
+        """
+        if self.workos_jwks_url_override:
+            return self.workos_jwks_url_override
+        return f"{self.workos_api_base.rstrip('/')}/sso/jwks/{self.workos_client_id}"
+
+    @property
+    def workos_accepted_issuers(self) -> tuple[str, ...]:
+        """Configured issuers, each accepted with and without a trailing slash.
+
+        `https://api.workos.com` and `https://api.workos.com/` name the same
+        authority and WorkOS's own documentation uses both, so accepting the pair
+        is not a weakening. Any other origin still fails.
+        """
+        accepted: list[str] = []
+        for issuer in self.workos_issuers:
+            value = issuer.strip()
+            if not value:
+                continue
+            for candidate in (value.rstrip("/"), value.rstrip("/") + "/"):
+                if candidate not in accepted:
+                    accepted.append(candidate)
+        return tuple(accepted)
+
+    @model_validator(mode="after")
+    def safe_auth_configuration(self) -> "Settings":
+        if any(
+            algorithm.upper().startswith(("HS", "NONE")) for algorithm in self.workos_algorithms
+        ):
+            # Symmetric or "none" algorithms would let a JWKS public key be
+            # replayed as a signing secret.
+            raise ValueError("Asymmetric signing algorithms only")
+        if self.environment == "production":
+            if not self.workos_configured:
+                raise ValueError("Production requires WorkOS client id and API key")
+            if not self.workos_api_base.startswith("https://"):
+                raise ValueError("Production requires an HTTPS WorkOS API base")
+            if not self.workos_jwks_url.startswith("https://"):
+                raise ValueError("Production requires an HTTPS WorkOS JWKS URL")
+            if not all(issuer.startswith("https://") for issuer in self.workos_accepted_issuers):
+                raise ValueError("Production requires HTTPS WorkOS issuers")
+        if not self.workos_accepted_issuers:
+            # An empty issuer list would disable issuer verification entirely.
+            raise ValueError("At least one WorkOS issuer is required")
+        return self
+
     @model_validator(mode="after")
     def separate_databases(self) -> "Settings":
         if self.database_url.path == self.dbos_system_database_url.path:
