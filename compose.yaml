@@ -16,7 +16,7 @@ services:
     image: postgres:17.6-bookworm
     environment:
       POSTGRES_PASSWORD: local_admin_only
-    ports: ["127.0.0.1:5432:5432"]
+    ports: ["127.0.0.1:5433:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -28,7 +28,12 @@ services:
     restart: unless-stopped
   migrate:
     <<: *backend
+    environment:
+      VESPERS_ENVIRONMENT: development
+      VESPERS_MIGRATION_DATABASE_URL: postgresql+psycopg://vespers_owner:local_owner_only@postgres:5432/vespers_development
     command: ["alembic", "upgrade", "head"]
+    volumes:
+      - ./backend:/app/backend
     restart: "no"
   api:
     <<: *backend
@@ -38,6 +43,12 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./backend:/app/backend
+    develop:
+      watch:
+        - path: ./backend
+          action: rebuild
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
       interval: 10s
@@ -46,11 +57,30 @@ services:
   worker:
     <<: *backend
     command: ["python", "-m", "backend.workflows.worker"]
+    volumes:
+      - ./backend:/app/backend
+    develop:
+      watch:
+        - path: ./backend
+          action: rebuild
+    healthcheck:
+      test: ["CMD", "python", "-m", "backend.workflows.readiness"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
   dashboard:
     build: ./apps/dashboard
     ports: ["127.0.0.1:3000:3000"]
     environment:
       NEXT_TELEMETRY_DISABLED: "1"
+    develop:
+      watch:
+        - path: ./apps/dashboard
+          action: rebuild
+          ignore:
+            - node_modules/
+            - .next/
+            - .env*
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s

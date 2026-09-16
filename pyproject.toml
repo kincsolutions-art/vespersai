@@ -9,7 +9,7 @@ dependencies = [
     "dbos==2.31.1",
     "fastapi==0.141.1",
     "psycopg[binary]==3.3.5",
-    "pydantic-ai-slim[dbos,openai]==2.43.0",
+    "pydantic-ai-slim[dbos,google]==2.43.0",
     "pydantic-settings==2.15.0",
     "sqlalchemy[asyncio]==2.0.53",
     "tavily-python==0.8.3",

@@ -12,9 +12,14 @@ Direct requests and configured schedules execute without approval screens. Clari
 missing recipients or accounts. Unsolicited suggestions require user acceptance;
 acceptance initiates execution without another approval step.
 
-Use FastAPI, Pydantic AI, DBOS, PostgreSQL, Nebius Token Factory BYOK, Composio,
-and Tavily with a separate platform key. No browser, shell execution, or web chat.
+Use FastAPI, Pydantic AI, DBOS, PostgreSQL, Gemini Developer API BYOK through native Pydantic AI Google support,
+Composio connected-app actions, direct Tavily API search with a separate platform-managed
+key and per-tenant quotas, and WorkOS AuthKit. No browser, shell execution, or web chat.
 Future shell work requires a separate sandbox service. No provider credits or shared
 billing are assumed. The referenced program email is not present in this repository.
 
 AGENTS.md and implementation-checklist.md contain the complete requirements.
+
+Provider change approved 2026-09-15: Nebius is unavailable to the project owner in
+Nepal. Direct Tavily search and Composio app actions are retained. No Gemini model has
+been verified; external hackathon eligibility remains unresolved.

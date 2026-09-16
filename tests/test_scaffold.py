@@ -3,10 +3,9 @@ import logging
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
 from backend.api.main import create_app
-from backend.config import Settings
+from backend.config import ConfigurationError, Settings
 from backend.logging import JsonFormatter
 
 
@@ -22,17 +21,17 @@ def settings(**overrides: object) -> Settings:
 
 
 def test_rejects_shared_database() -> None:
-    with pytest.raises(ValidationError, match="must be separate"):
+    with pytest.raises(ConfigurationError, match="separate app/DBOS"):
         settings(dbos_system_database_url="postgresql+psycopg://dbos:password@localhost/app_test")
 
 
 def test_rejects_cross_environment_database() -> None:
-    with pytest.raises(ValidationError, match="environment name"):
+    with pytest.raises(ConfigurationError, match="environment suffixes"):
         settings(database_url="postgresql+psycopg://app:password@localhost/app_production")
 
 
 def test_production_requires_encryption_key() -> None:
-    with pytest.raises(ValidationError, match="external encryption key"):
+    with pytest.raises(ConfigurationError, match="production encryption key"):
         settings(
             environment="production",
             database_url="postgresql+psycopg://app:password@localhost/app_production",

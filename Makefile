@@ -26,3 +26,7 @@ smoke:
 	uv run python -m backend.workflows.worker --smoke
 up:
 	docker compose up --build -d
+
+.PHONY: integration
+integration:
+	uv run python tests/integration/run.py

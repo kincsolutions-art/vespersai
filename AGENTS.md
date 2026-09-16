@@ -15,8 +15,8 @@ The project is planned from scratch. The implementation checklist is a plan, not
 - No web chat.
 - Backend signup allowlist: initially one verified real account and one Telegram connection. Multi-tenancy must work from day one and be verified using synthetic tenants.
 - Always-on shared trusted workers. No process, container, or VM per user for this API-only MVP.
-- Nebius Token Factory BYOK for inference. Discover models through the provider API and expose a tested compatibility list.
-- Composio for app authentication and actions. Tavily by Nebius for search through its API.
+- Google Gemini Developer API BYOK for inference, using Pydantic AI’s native GoogleProvider. Require an explicit model ID and a tested compatibility list; never use ambient/global keys, implicit models, Vertex AI, or provider fallbacks.
+- Composio for connected-app authentication/actions. Direct Tavily API for web search, with a separate platform-managed key and per-tenant quotas.
 - No browser execution. Shell is deferred beyond the MVP. Any future shell runs in a separate isolated sandbox, never inside a shared backend worker.
 - No action approval screens or approval states. Execute direct requests and configured schedules within authorized capabilities. Ask only when essential information is missing or ambiguous.
 - An unsolicited suggestion is not a standing instruction. Acceptance such as “do that” initiates the proposed work without another confirmation. Clarify an ambiguous reference rather than guessing.
@@ -30,9 +30,10 @@ The project is planned from scratch. The implementation checklist is a plan, not
 | Pydantic AI | Model/tool loop and structured outputs |
 | DBOS | Durable workflows, queues, schedules, recovery |
 | PostgreSQL | Tenant data, conversation/task state, and DBOS persistence |
-| Nebius Token Factory | User-funded model inference |
+| Gemini Developer API | User-funded model inference |
 | Composio | Tenant-scoped connected-app access |
-| Tavily | API search |
+| Tavily | API search with separate platform key and tenant quotas |
+| WorkOS AuthKit | Selected authentication component |
 
 Initial deployment: one modest always-on VPS, approximately 8 GB RAM as a starting assumption, using Docker Compose for HTTPS reverse proxy, dashboard, API, worker, and PostgreSQL. Benchmark before claiming capacity. No GPU is required for API inference.
 
@@ -54,7 +55,7 @@ tests/
 infra/
 ```
 
-Respect existing repository conventions if implementation has already begun. Pin dependencies and commit lockfiles. Verify installed SDK interfaces before coding from examples; compatibility between the selected Nebius model, Pydantic AI, Composio, and DBOS must be tested.
+Respect existing repository conventions if implementation has already begun. Pin dependencies and commit lockfiles. Verify installed SDK interfaces before coding from examples; compatibility between the selected Gemini model, Pydantic AI, Composio, and DBOS must be tested. Composio live connection/action testing is explicitly deferred until onboarding UI exists; this does not block tenant foundations or authentication. Require an ownership-checked live action test before real connected-app execution.
 
 ## Tenant isolation: mandatory boundaries
 
@@ -77,9 +78,10 @@ Respect existing repository conventions if implementation has already begun. Pin
 - Cache model discovery by credential identity and invalidate on key changes. A model appearing in the API does not prove tool-call or structured-output compatibility.
 - Never silently fall back to a platform-funded key or a different provider.
 - Scheduled work and proactive discovery consume the user's BYOK allowance too; explain this during setup.
-- Use a separate platform Tavily key with per-tenant quotas for the MVP. Do not assume it shares Nebius credentials or credits.
-- The supplied Nebius AI Builder Program email names Composio among ecosystem partners. This does not establish bundled pricing, API keys, or credits. Verify program benefits separately.
-- Verify the hackathon's current model and submission requirements before submitting; include an eligible NVIDIA model.
+- Use a separate platform-managed Tavily key with per-tenant quotas for the MVP. Bound queries, results, and timeouts; preserve source URLs. Search billing is separate from Gemini BYOK and Composio app actions.
+- Historical context: the referenced Nebius AI Builder Program email names Composio, but does not establish bundled pricing, API keys, or credits. The current provider choice supersedes that integration plan.
+- External hackathon eligibility/model requirements remain unresolved. Do not imply Gemini satisfies NVIDIA/Nebius event requirements.
+- Provider change approved 2026-09-15 because Nebius is unavailable to the project owner in Nepal. Keep free-tier Gemini spike data synthetic/non-sensitive; paid and unpaid API data terms differ. Consumer Gemini subscriptions do not establish API billing/quota.
 
 ## Authentication and Telegram linking
 

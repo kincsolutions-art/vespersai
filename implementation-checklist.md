@@ -1,7 +1,9 @@
 # Telegram AI Agent — Implementation Checklist
 
-Status: scope locked; repository scaffold implemented; product features and the phase 2 integration gate remain pending.
+Status: scope locked; local scaffold startup, privilege boundaries, worker readiness, and harmless PostgreSQL interrupted recovery verified; direct Tavily live search verified; Gemini generation compatibility and product features remain pending.
 Prepared: 2026-09-15.
+
+Provider change approved 2026-09-15: Gemini Developer API BYOK replaces Nebius because Nebius is unavailable to the project owner in Nepal. Direct Tavily search with a separate platform-managed key and per-tenant quotas is retained. This changes planned providers, not historical infrastructure results.
 
 Work through phases in order. Check items only after implementation and verification. Phase gates are release requirements, not claims that work is complete.
 
@@ -16,9 +18,9 @@ Work through phases in order. Check items only after implementation and verifica
 - [ ] Execute direct requests and configured schedules without approval screens. Clarify genuinely missing information; do not guess recipients or accounts.
 - [ ] Treat unsolicited suggestions as proposals, not standing instructions. A user accepting a suggestion starts execution without another approval step.
 - [ ] Exclude browser execution, shell execution, and web chat from the MVP. Future shell support requires isolated sandboxes, never generated code inside shared workers.
-- [ ] Use Nebius Token Factory BYOK; use a tested NVIDIA model where required for the hackathon.
-- [ ] Use Composio for connected-app authentication/actions and Tavily by Nebius for search.
-- [ ] Record the supplied Nebius AI Builder Program email as evidence that it names Composio among ecosystem partners. Do not assume bundled billing, credits, or shared API keys; verify actual program benefits separately.
+- [ ] Use Gemini Developer API BYOK through native Pydantic AI Google support, with an explicit tested model ID and no fallback.
+- [ ] Use Composio for connected-app authentication/actions and direct Tavily API for web search.
+- [ ] If pursuing the external event, verify eligibility and program benefits separately; historical Nebius partner references do not establish Gemini eligibility, bundled billing, credits, or shared keys.
 
 ## 2. Scaffold the codebase
 
@@ -41,23 +43,46 @@ infra/
 - [x] Initialize the repository, dependency lockfiles, pinned versions, and environment configuration validation.
 - [x] Configure formatting, linting, type checking, CI, and migration commands.
 - [x] Provide a secret-free environment example and local setup instructions.
-- [ ] Add Docker Compose for dashboard, API, worker, and PostgreSQL.
+- [x] Add Docker Compose for dashboard, API, worker, and PostgreSQL.
 - [ ] Separate development, test, and production credentials/databases.
 - [x] Add health/readiness endpoints and structured request/task logging.
-- [ ] Establish a small provider compatibility spike before building deeply against SDK interfaces: selected Nebius model, Pydantic AI tool calling, Composio execution, and DBOS recovery.
+- [ ] Establish a small provider compatibility spike before building deeply against SDK interfaces: selected Gemini model, Pydantic AI tool calling, direct Tavily, and DBOS recovery. Composio live actions are deferred until onboarding UI and do not block tenant foundations.
 
 Scaffold verification (2026-09-15):
 
-- Scope recorded in `docs/scope.md`; exact Python/npm dependencies and lockfiles added.
-- Local lint, formatting, type checks, six backend tests, and dashboard production build pass.
-- Alembic baseline renders PostgreSQL SQL; application tables are intentionally not created yet.
-- API liveness/readiness and structured request/smoke-task logging are implemented. DB outage behavior is tested.
-- DBOS completed-workflow retrieval after runtime restart passes using temporary SQLite storage; PostgreSQL recovery and external side-effect semantics are not established by this test.
-- Compose and CI definitions are present and parse successfully. Docker is unavailable locally, so Compose startup remains unchecked; CI includes that check and a PostgreSQL smoke workflow but has not run remotely.
-- Environment-name validation and separate local app/DBOS roles/databases are configured; independent test/production credentials and databases are not provisioned.
-- Installed DBOS, Pydantic AI DBOS adapter, and Composio imports/interfaces were inspected. Live provider compatibility remains pending; see `docs/provider-compatibility.md`.
+- Scope recorded in `docs/scope.md`; pinned dependencies and lockfiles retained without updates.
+- Local lint, formatting, type checks, 19 backend tests, and dashboard production build pass.
+- Isolated full-stack Compose build/startup and PostgreSQL baseline migration/smoke pass. The baseline creates no tenant product tables.
+- AUD-01/AUD-03: configuration errors omit input values and original exception chains; supported driver validation and captured API/worker/migration startup failures are tested with synthetic credentials.
+- AUD-02: separate migration owner and runtime roles verified against PostgreSQL. Actual runtime identity sees no rows under deny-all RLS and cannot alter tables/policies, create tables, assume owner, or connect to DBOS storage. Migration credentials are scoped to the migration service.
+- Existing-development ownership transition passes twice on a disposable legacy database with data preserved. Existing user volumes were not changed; see `docs/local-verification.md`.
+- AUD-04: resident readiness starts after DBOS initialization; negative checks cover worker termination and database outage, with readiness returning after reconnection.
+- Genuine interrupted recovery passes: client-only enqueue, stable workflow identity, resident hostname evidence, controlled unfinished boundary, SIGKILL, same-executor restart, SUCCESS, and one execution of the already completed step. This proves only the harmless test workflow, not external-action safety or full Pydantic AI durability.
+- CI now runs the isolated integration harness; remote CI results remain unobserved.
+- Development and disposable test storage are separated. Production credentials/databases remain unprovisioned, so the environment-separation item stays pending.
+- Historical pre-spike status: live Gemini/Pydantic AI tool calls, Composio actions, and Tavily compatibility were unverified; designated test credentials/accounts and budgets are required. See `docs/provider-compatibility.md`.
 
-Gate: a developer can start the stack from documented steps and execute a test workflow.
+Historical provider preparation (2026-09-15, before the bounded spike): native Gemini Developer API construction seam and secret-free `.env.spike.example` added; direct Tavily 0.8.3 and Composio 0.21.1 retained. The Gemini model ID remains an explicit pending choice. Offline checks pass: 26 tests, lint/format/types, dashboard build, and Compose configuration validation. No live runner or provider calls were introduced. Prior infrastructure/recovery evidence above is preserved; this provider preparation does not rerun or extend those recovery claims.
+
+Bounded compatibility spike (2026-09-15):
+
+| Capability | Model/tool/SDK | Offline/live | Verdict | Evidence and limitation |
+| --- | --- | --- | --- | --- |
+| Gemini discovery | gemini-3.5-flash-lite / google-genai 2.23.0 | Live | Pass | One request; listing alone is not compatibility |
+| Gemini text/tool/structured | Same model / Pydantic AI 2.43.0 | Live | Failed / blocked | Two generations returned ModelHTTPError HTTP 504; no generation token usage reported |
+| Direct Tavily search | Tavily 0.8.3 / basic search | Live | Pass | One search, three relevant usable sources, one reported credit; quotas remain pending |
+| Native Google tool/output assertions | Pydantic AI 2.43.0 / synthetic HTTP | Offline | Pass | Actual local tool and validated structured result with mocked responses |
+| Adapter recovery | Pydantic AI 2.43.0 / DBOS 2.31.1 | Offline PostgreSQL | Pass | Completed model/tool executed once each; pending model executed twice; no external-effect guarantee |
+| Composio imports/signatures | Composio 0.21.1 | Offline | Pass | initiate/execute inspected without network requests |
+| Composio app actions | Composio 0.21.1 / tool TBD | Live | Deferred until onboarding UI | Explicit deferral allows tenant foundations and authentication; later ownership-checked live action still required |
+
+Local checks passed: 37 offline tests, formatting/lint/types, dashboard build, and isolated full-stack PostgreSQL integration including adapter recovery and synthetic-secret checks.
+
+The complete report, commands, limits and prior evidence are in `docs/provider-compatibility.md`.
+No product features or phase 3 work were started. Remote CI is unverified; production
+provisioning remains separate outstanding work.
+
+Gate: local stack startup and test workflow execution verified. Phase 2 remains incomplete while live provider compatibility and full environment provisioning are pending.
 
 ## 3. Define data ownership and persistence
 
@@ -78,10 +103,14 @@ Gate: synthetic tenant A cannot access tenant B through repository calls, APIs, 
 
 ## 4. Authentication and onboarding
 
-- [ ] Implement verified-email authentication using an established authentication component.
-- [ ] Enforce the allowlist server-side, including direct signup API requests.
+Selected authentication component: WorkOS AuthKit. This is a design decision; integration is not implemented. Complete the phase 3 tenant foundations before wiring authentication to application access. WorkOS sign-in does not replace backend allowlist enforcement or local tenant authorization.
+
+- [ ] Configure WorkOS AuthKit for the Next.js dashboard, with separate environment configuration and callback/logout URLs; pin and verify SDK versions during implementation.
+- [ ] Implement verified-email authentication using WorkOS AuthKit.
+- [ ] Validate authentication server-side in FastAPI and resolve the authenticated WorkOS user to local users, tenants, and memberships; never trust client-supplied tenant identity.
+- [ ] Enforce the allowlist server-side, including direct signup API requests and WorkOS callback/session entry points; successful WorkOS sign-in alone must not grant application access.
 - [ ] Normalize email consistently without assuming provider-specific aliases.
-- [ ] Create user, tenant, and membership atomically; handle duplicate callbacks safely.
+- [ ] Create user, tenant, and membership atomically; persist a unique WorkOS user mapping and handle duplicate callbacks safely.
 - [ ] Protect sessions and APIs with secure cookies, appropriate CSRF protection, rate limits, and authenticated membership checks.
 - [ ] Persist onboarding progress across expired sessions and browser disconnects.
 - [ ] Collect timezone (Asia/Kathmandu initially), quiet hours, and user goals.
@@ -93,10 +122,10 @@ Gate: synthetic tenant A cannot access tenant B through repository calls, APIs, 
 - [ ] Encrypt secrets with versioned encryption; keep the encryption key outside PostgreSQL and source control.
 - [ ] Build a tenant-authorized credential resolver. Persist references, not raw credentials, in workflow inputs.
 - [ ] Redact secrets from prompts, logs, traces, task events, exception messages, and workflow histories.
-- [ ] Validate Nebius keys and retrieve models from the Token Factory models API.
+- [ ] Validate Gemini Developer API keys and inspect available models; require an explicit model ID and separately tested tool/structured-output support.
 - [ ] Cache model lists per credential identity; invalidate on key changes.
 - [ ] Maintain a tested supported-model list for tool calling and structured output; API listing alone is insufficient.
-- [ ] Include a qualifying NVIDIA model and verify event requirements before submission.
+- [ ] Verify external event requirements separately before submission; Gemini does not imply compliance with NVIDIA/Nebius requirements.
 - [ ] Build clients per run/credential scope; never mutate global API keys.
 - [ ] Support key replacement, deletion, and unavailable model recovery.
 - [ ] Define credential resolution boundaries for queued, running, and recovered tasks.
@@ -134,7 +163,7 @@ Gate: a linked user can submit one persisted task; repeated delivery of the upda
 - [ ] Handle revoked connections, missing permissions, changed schemas, removed tools, and deleted external records.
 - [ ] Record action intent, attempt status, provider identifiers, and item-level outcomes for bulk operations.
 - [ ] Use conditional updates or serialize conflicting edits where available.
-- [ ] Add Tavily through a separate platform key with per-tenant quotas; keep its billing separate from Nebius BYOK.
+- [ ] Add Tavily through a separate platform-managed key with per-tenant quotas and usage accounting; keep its billing separate from Gemini BYOK.
 - [ ] Bound search counts, result size, timeouts, and sensitive query content.
 - [ ] Add tools for schedule management, memory/preferences, and task status.
 - [ ] Treat retrieved email/documents/search content as untrusted data; enforce permissions outside the model.
@@ -267,7 +296,7 @@ Gate: complete end-to-end acceptance on the deployed account. Single-VM durabili
 
 ## 16. Hackathon and final acceptance
 
-- [ ] Verify current event eligibility, deadline, required NVIDIA model usage, and submission requirements.
+- [ ] Verify current external event eligibility, deadline, provider/model restrictions, and submission requirements; eligibility under the changed architecture remains unresolved.
 - [ ] Verify any AI Builder Program credits or partner benefits; record expiry and restrictions without assuming bundled services.
 - [ ] Demonstrate signup, BYOK/model selection, Telegram linking, and app authorization.
 - [ ] Demonstrate real app action and cited search results.
@@ -296,6 +325,6 @@ These are implementation starting points from our discussion. Pin actual SDK ver
 - Pydantic AI DBOS integration: https://pydantic.dev/docs/ai/capabilities/durable_execution/dbos/
 - DBOS recovery: https://docs.dbos.dev/production/workflow-recovery
 - DBOS schedules: https://docs.dbos.dev/python/tutorials/scheduled-workflows
-- Nebius model discovery: https://docs.tokenfactory.nebius.com/api-reference/models/list-models
-- Tavily integration: https://docs.tokenfactory.nebius.com/integrations/search/tavily
+- Gemini model discovery: https://ai.google.dev/api/models
+- Tavily: https://docs.tavily.com/
 - Composio: https://docs.composio.dev/

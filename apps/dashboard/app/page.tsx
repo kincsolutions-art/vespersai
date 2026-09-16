@@ -1,7 +1,11 @@
 import Image from "next/image";
 const features = [
   ["01", "Your account", "Verified email and private access."],
-  ["02", "Your model", "Connect your Nebius key and choose a supported model."],
+  [
+    "02",
+    "Your model",
+    "Connect your Gemini API key and choose a supported model.",
+  ],
   ["03", "Your Telegram", "Link your private chat with Vespers."],
   ["04", "Your apps", "Connect the tools you already use."],
 ];
@@ -49,7 +53,8 @@ export default function Home() {
         This dashboard will manage your account, connections, and automations.
         Conversations happen in Telegram.
         <br />
-        Scheduled tasks and suggestions also use your Nebius inference credits.
+        Scheduled tasks and suggestions also use your Gemini API inference
+        credits.
       </footer>
     </main>
   );
