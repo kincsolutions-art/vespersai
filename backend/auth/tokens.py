@@ -120,6 +120,12 @@ class AccessTokenValidator:
         except jwt.ExpiredSignatureError:
             raise TokenError("expired") from None
         except jwt.InvalidIssuerError:
+            # Fixed label, and deliberately no echo of the presented `iss`. A
+            # signature-verified claim is authentic but still attacker-influenced
+            # in content, and this label reaches both an unauthenticated HTTP
+            # response and the log line. An operator configuring a custom auth
+            # domain reads the expected value from the WorkOS dashboard, not from
+            # our error text; see docs/authentication.md.
             raise TokenError("wrong-issuer") from None
         except jwt.InvalidAudienceError:
             raise TokenError("wrong-audience") from None

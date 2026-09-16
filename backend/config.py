@@ -71,13 +71,18 @@ class Settings(SafeSettings):
     workos_client_id: str | None = None
     workos_api_key: SecretStr | None = None
     workos_api_base: str = "https://api.workos.com"
-    # Accepted `iss` values. WorkOS documents "https://api.workos.com/" in the
-    # AuthKit session guide and "https://api.workos.com" in the API reference, and
-    # states that the value changes when a custom auth domain is configured and
-    # should be read from configuration rather than hardcoded. Both spellings of
-    # one origin are accepted (see `workos_accepted_issuers`); a different origin
-    # is not.
-    workos_issuers: list[str] = ["https://api.workos.com"]
+    # Accepted `iss` values. Leave empty to derive the default, which is what
+    # WorkOS actually issues (verified against a live token on 2026-09-16):
+    #
+    #     https://api.workos.com/user_management/<client_id>
+    #
+    # NOT the value either documentation page shows. The AuthKit sessions guide
+    # says "https://api.workos.com/" and the API reference "https://api.workos.com";
+    # both are wrong for AuthKit session tokens. The real value is client-scoped,
+    # which makes the issuer a second application-binding check alongside the
+    # per-client key set. Set this explicitly for a custom auth domain, reading
+    # the value from a decoded token as WorkOS advises.
+    workos_issuers: list[str] = []
     # AuthKit session access tokens carry no `aud` claim by default; the key set
     # is per-client instead. WorkOS supports adding one through a JWT template,
     # which is the documented way to bind a token to a specific API. Set this only
@@ -120,6 +125,12 @@ class Settings(SafeSettings):
             return self.workos_jwks_url_override
         return f"{self.workos_api_base.rstrip('/')}/sso/jwks/{self.workos_client_id}"
 
+    def _derived_issuers(self) -> list[str]:
+        if not self.workos_client_id:
+            return []
+        base = self.workos_api_base.rstrip("/")
+        return [f"{base}/user_management/{self.workos_client_id}"]
+
     @property
     def workos_accepted_issuers(self) -> tuple[str, ...]:
         """Configured issuers, each accepted with and without a trailing slash.
@@ -128,8 +139,9 @@ class Settings(SafeSettings):
         authority and WorkOS's own documentation uses both, so accepting the pair
         is not a weakening. Any other origin still fails.
         """
+        configured = self.workos_issuers or self._derived_issuers()
         accepted: list[str] = []
-        for issuer in self.workos_issuers:
+        for issuer in configured:
             value = issuer.strip()
             if not value:
                 continue
@@ -155,7 +167,7 @@ class Settings(SafeSettings):
                 raise ValueError("Production requires an HTTPS WorkOS JWKS URL")
             if not all(issuer.startswith("https://") for issuer in self.workos_accepted_issuers):
                 raise ValueError("Production requires HTTPS WorkOS issuers")
-        if not self.workos_accepted_issuers:
+        if self.workos_configured and not self.workos_accepted_issuers:
             # An empty issuer list would disable issuer verification entirely.
             raise ValueError("At least one WorkOS issuer is required")
         return self

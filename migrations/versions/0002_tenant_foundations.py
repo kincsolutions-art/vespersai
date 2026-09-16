@@ -368,8 +368,13 @@ def upgrade() -> None:
     # non-owner role, on top of holding no grant at all.
 
     # ---- Grants -----------------------------------------------------------
-    # infra/init-db.sql sets ALTER DEFAULT PRIVILEGES granting full DML on new
-    # tables to the runtime role, so every table must be revoked and re-granted.
+    # Historical note (the applied behaviour below is unchanged): at the time
+    # this revision was written, infra/init-db.sql set ALTER DEFAULT PRIVILEGES
+    # granting full DML on new tables to the runtime role, so every table here
+    # had to be revoked and re-granted. Migration 0003 removed those defaults and
+    # init-db.sql no longer sets them, so on a fresh database these REVOKEs are
+    # no-ops — they remain correct, and necessary, for databases initialized
+    # before that change.
     grants = "\n".join(
         [
             "REVOKE ALL ON public.users, public.tenants, public.memberships,"

@@ -17,7 +17,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from backend.auth.tokens import AccessTokenValidator, AuthNotConfigured, TokenError
 from backend.config import Settings
 
-ISSUER = "https://api.workos.com/"
+# The value WorkOS actually issues: client-scoped, not the documented origin.
+ISSUER = "https://api.workos.com/user_management/client_synthetic"
 CLIENT_ID = "client_synthetic"
 SUBJECT = "user_synthetic_01"
 
@@ -230,24 +231,49 @@ def test_a_custom_auth_domain_can_override_the_key_set_url() -> None:
     assert settings(workos_jwks_url_override=custom).workos_jwks_url == custom
 
 
-@pytest.mark.parametrize("configured", ["https://api.workos.com", "https://api.workos.com/"])
-@pytest.mark.parametrize("presented", ["https://api.workos.com", "https://api.workos.com/"])
+@pytest.mark.parametrize("configured", [ISSUER, ISSUER + "/"])
+@pytest.mark.parametrize("presented", [ISSUER, ISSUER + "/"])
 def test_trailing_slash_issuer_spellings_are_interchangeable(
     rsa_key: Any, configured: str, presented: str
 ) -> None:
-    """WorkOS documents both spellings of the same origin."""
+    """WorkOS's own documentation uses both spellings of one value."""
     config = settings(workos_issuers=[configured])
     validator = AccessTokenValidator(config, jwk_client=StubKeySource(rsa_key.public_key()))
     assert validator.verify(make_token(rsa_key, iss=presented)).subject == SUBJECT
 
 
+def test_the_default_issuer_is_the_client_scoped_value_workos_really_issues() -> None:
+    """Verified against a live WorkOS token on 2026-09-16.
+
+    Both WorkOS documentation pages say the bare origin; neither matches what
+    AuthKit actually mints. Defaulting to the bare origin rejected every real
+    token, so this pins the observed value — which is also stronger, because a
+    client-scoped issuer binds the token to this application a second time.
+    """
+    assert settings(workos_issuers=[]).workos_accepted_issuers == (
+        f"https://api.workos.com/user_management/{CLIENT_ID}",
+        f"https://api.workos.com/user_management/{CLIENT_ID}/",
+    )
+
+
+def test_another_workos_applications_issuer_is_rejected(rsa_key: Any) -> None:
+    """The issuer alone now distinguishes applications within WorkOS."""
+    validator = AccessTokenValidator(
+        settings(workos_issuers=[]), jwk_client=StubKeySource(rsa_key.public_key())
+    )
+    other = "https://api.workos.com/user_management/client_someone_else"
+    with pytest.raises(TokenError, match="wrong-issuer"):
+        validator.verify(make_token(rsa_key, iss=other))
+
+
 @pytest.mark.parametrize(
     "hostile",
     [
-        "https://api.workos.com.evil.test/",
+        "https://api.workos.com.evil.test/user_management/client_synthetic",
         "https://evil.test/api.workos.com/",
-        "http://api.workos.com/",
-        "https://api.workos.com/extra",
+        "http://api.workos.com/user_management/client_synthetic",
+        "https://api.workos.com/",
+        "https://api.workos.com/user_management/client_synthetic/extra",
     ],
 )
 def test_lookalike_issuers_are_rejected(rsa_key: Any, hostile: str) -> None:
@@ -256,9 +282,41 @@ def test_lookalike_issuers_are_rejected(rsa_key: Any, hostile: str) -> None:
         validator.verify(make_token(rsa_key, iss=hostile))
 
 
-def test_an_empty_issuer_list_is_refused_at_configuration_time() -> None:
-    with pytest.raises(ValueError):
-        settings(workos_issuers=[])
+# A signature-verified `iss` is authentic but still attacker-influenced content,
+# and the rejection label reaches both an unauthenticated HTTP response and a log
+# line. This stand-in is shaped like something that must never appear in either.
+SECRET_SHAPED_ISSUER = "https://evil.test/sk_live_synthetic_do_not_echo?cookie=session_synthetic"
+
+
+def test_the_rejection_is_a_fixed_label(rsa_key: Any) -> None:
+    """No echo of the presented issuer, however it was spelled."""
+    validator = AccessTokenValidator(settings(), jwk_client=StubKeySource(rsa_key.public_key()))
+    for hostile in ("https://tenant.authkit.app", SECRET_SHAPED_ISSUER):
+        with pytest.raises(TokenError) as raised:
+            validator.verify(make_token(rsa_key, iss=hostile))
+        assert str(raised.value) == "wrong-issuer"
+
+
+def test_the_rejection_never_carries_the_token_or_the_presented_issuer(rsa_key: Any) -> None:
+    validator = AccessTokenValidator(settings(), jwk_client=StubKeySource(rsa_key.public_key()))
+    token = make_token(rsa_key, iss=SECRET_SHAPED_ISSUER, sub="user_secretish")
+    with pytest.raises(TokenError) as raised:
+        validator.verify(token)
+    message = str(raised.value)
+    assert token not in message
+    assert "user_secretish" not in message
+    for fragment in ("sk_live_synthetic_do_not_echo", "session_synthetic", "evil.test"):
+        assert fragment not in message, message
+
+
+def test_issuer_verification_can_never_be_switched_off_by_emptying_the_list() -> None:
+    """An empty list means "derive", not "accept anything"."""
+    assert settings(workos_issuers=[]).workos_accepted_issuers
+    # With no client id there is nothing to derive, but then WorkOS is
+    # unconfigured and every protected route already fails closed with 503.
+    unconfigured = settings(workos_client_id=None, workos_api_key=None, workos_issuers=[])
+    assert unconfigured.workos_configured is False
+    assert unconfigured.workos_accepted_issuers == ()
 
 
 def test_a_token_with_an_audience_is_refused_when_none_is_configured(rsa_key: Any) -> None:

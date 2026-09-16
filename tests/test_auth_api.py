@@ -4,6 +4,8 @@ The token validator is the production one (signatures are genuinely checked);
 only the JWKS source, the WorkOS directory and the database session are stubbed.
 """
 
+import io
+import logging
 import time
 import uuid
 from typing import Any
@@ -20,8 +22,10 @@ from backend.auth.ratelimit import FixedWindowLimiter
 from backend.auth.tokens import AccessTokenValidator
 from backend.auth.workos import VerifiedProfile
 from backend.config import Settings
+from backend.logging import JsonFormatter
 
-ISSUER = "https://api.workos.com/"
+# The value WorkOS actually issues: client-scoped, not the documented origin.
+ISSUER = "https://api.workos.com/user_management/client_synthetic"
 SUBJECT = "user_synthetic_01"
 USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 TENANT_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -479,6 +483,90 @@ def test_provisioning_reports_only_access_a_later_request_would_allow() -> None:
     assert response.json()["detail"] == "no-active-membership"
 
 
+def test_invalid_identity_input_is_a_bad_request_not_an_outage() -> None:
+    """SQLSTATE 22023 from the bootstrap surface: bad input, not a failed database.
+
+    Reporting it as `503 provisioning-unavailable` would send an operator hunting
+    a database they have no reason to suspect.
+    """
+    from backend.identity import InvalidIdentityInput
+
+    plan = default_plan() | {"provision_error": InvalidIdentityInput("refused")}
+    response = build(plan).post(
+        "/api/account/provision", headers={"Authorization": f"Bearer {token()}"}
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid-identity-input"
+
+
+def test_an_unexpected_database_failure_stays_distinct_and_says_nothing() -> None:
+    """503, and not one character of the driver's message."""
+    secret = "sk_live_synthetic_do_not_echo host=db password=synthetic"
+    plan = default_plan() | {"provision_error": OperationalError(secret, {}, Exception(secret))}
+    response = build(plan).post(
+        "/api/account/provision", headers={"Authorization": f"Bearer {token()}"}
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "provisioning-unavailable"
+    for fragment in ("sk_live_synthetic_do_not_echo", "password=synthetic", "host=db"):
+        assert fragment not in response.text, response.text
+
+
+# ---- Upstream email changes ----------------------------------------------
+
+
+def test_an_upstream_email_change_does_not_affect_a_protected_read() -> None:
+    """Read paths never call WorkOS, so they cannot see an upstream change.
+
+    Authorization stays keyed to the verified subject and the *stored* address.
+    An email the user can change upstream is deliberately not what grants access.
+    """
+    plan = default_plan()
+    plan["directory"] = StubDirectory(
+        # If a read path consulted WorkOS, this new address would surface.
+        profile=VerifiedProfile(SUBJECT, "changed@synthetic.invalid", True)
+    )
+    client = build(plan)
+    response = client.get("/api/account", headers={"Authorization": f"Bearer {token()}"})
+    assert response.status_code == 200, response.text
+    assert response.json()["email"] == "person@synthetic.invalid"
+    checked = [params["email"] for sql, params in plan["calls"] if "app.signup_allowed" in sql]
+    assert checked == ["person@synthetic.invalid"], checked
+
+
+def test_revocation_of_the_stored_address_still_bites_immediately() -> None:
+    """The counterpart: an administrator revokes the address we actually hold.
+
+    So the slower email-change path is not a revocation gap — removing the stored
+    address from the allowlist is refused on the very next request.
+    """
+    client, plan, headers = established_session()
+    plan["directory"] = StubDirectory(
+        profile=VerifiedProfile(SUBJECT, "changed@synthetic.invalid", True)
+    )
+    assert client.get("/api/account", headers=headers).status_code == 200
+    plan["allowlisted"] = False
+    denied = client.get("/api/account", headers=headers)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "not-allowlisted"
+
+
+def test_an_upstream_email_change_is_reconciled_only_by_provisioning() -> None:
+    """And it still has to pass the allowlist in its own right."""
+    plan = default_plan()
+    plan["directory"] = StubDirectory(
+        profile=VerifiedProfile(SUBJECT, "changed@synthetic.invalid", True)
+    )
+    response = build(plan).post(
+        "/api/account/provision", headers={"Authorization": f"Bearer {token()}"}
+    )
+    assert response.status_code == 200, response.text
+    # Provisioning is the only place the new address reaches the database.
+    provisioned = [params for sql, params in plan["calls"] if "provision_personal_identity" in sql]
+    assert provisioned and provisioned[0]["email"] == "changed@synthetic.invalid"
+    assert provisioned[0]["external_id"] == SUBJECT
+
+
 def test_subject_binding_required_is_a_conflict_not_an_account_handover() -> None:
     from backend.identity import SubjectBindingRequired
 
@@ -493,22 +581,53 @@ def test_subject_binding_required_is_a_conflict_not_an_account_handover() -> Non
 # ---- Application binding of the token ------------------------------------
 
 
-@pytest.mark.parametrize("issuer", ["https://api.workos.com", "https://api.workos.com/"])
-def test_both_documented_issuer_spellings_are_accepted(issuer: str) -> None:
-    """WorkOS documents the value with and without a trailing slash."""
-    client = build(default_plan(), workos_issuers=["https://api.workos.com"])
+@pytest.mark.parametrize("issuer", [ISSUER, ISSUER + "/"])
+def test_both_trailing_slash_spellings_are_accepted(issuer: str) -> None:
+    client = build(default_plan(), workos_issuers=[ISSUER])
     response = client.get("/api/account", headers={"Authorization": f"Bearer {token(iss=issuer)}"})
     assert response.status_code == 200, response.text
 
 
-def test_a_different_issuer_origin_is_still_rejected() -> None:
-    client = build(default_plan(), workos_issuers=["https://api.workos.com"])
-    response = client.get(
-        "/api/account",
-        headers={"Authorization": f"Bearer {token(iss='https://api.workos.com.evil.test/')}"},
-    )
+def test_another_applications_issuer_is_rejected_end_to_end() -> None:
+    client = build(default_plan(), workos_issuers=[ISSUER])
+    other = "https://api.workos.com/user_management/client_someone_else"
+    response = client.get("/api/account", headers={"Authorization": f"Bearer {token(iss=other)}"})
     assert response.status_code == 401
     assert response.json()["detail"] == "wrong-issuer"
+
+
+def test_the_issuer_rejection_reaches_neither_the_client_nor_the_log() -> None:
+    """The label is fixed on both paths: the response body and the log line.
+
+    A rejected `iss` is signature-verified but still attacker-influenced content,
+    and this endpoint is reachable without any credential. The capture goes
+    through the real JsonFormatter, so this covers what is actually written.
+    """
+    hostile = "https://evil.test/sk_live_synthetic_do_not_echo?cookie=session_synthetic"
+    bearer = token(iss=hostile)
+    client = build(default_plan(), workos_issuers=[ISSUER])
+
+    # configure_logging() sets propagate=False on "vespers", so caplog's root
+    # handler never sees these records. Attach to the real logger instead.
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    logger = logging.getLogger("vespers")
+    logger.addHandler(handler)
+    try:
+        response = client.get("/api/account", headers={"Authorization": f"Bearer {bearer}"})
+    finally:
+        logger.removeHandler(handler)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "wrong-issuer"
+
+    logged = stream.getvalue()
+    assert "auth_token_rejected" in logged
+    assert '"reason": "wrong-issuer"' in logged
+    for fragment in (bearer, "sk_live_synthetic_do_not_echo", "session_synthetic", "evil.test"):
+        assert fragment not in logged, "log leaked token-controlled content"
+        assert fragment not in response.text, "response leaked token-controlled content"
 
 
 def test_a_token_carrying_an_audience_is_refused_when_none_is_configured() -> None:

@@ -171,17 +171,41 @@ assumed; see [authentication](docs/authentication.md#application-binding).
 | Subjectless provisioning refused | Pass, Python and SQL layers | Blank, whitespace, explicit NULL, and the dropped two-argument form |
 | Unbound row not adoptable | Pass, real PostgreSQL | Fails closed `VS003`; owner binding is the only path |
 | Revocation on an established session | Pass, 5 offline + 1 PostgreSQL stage | Allowlist, user, tenant, membership |
-| Issuer/audience/key-set binding | Pass, real signatures | Documented values; a live token is still required to confirm them |
+| Issuer/audience/key-set binding | Pass, real signatures | The derived issuer is the client-scoped value newer WorkOS environments mint, not the bare origin both documentation pages show |
 | Token-free operator access report | Pass, 14 offline tests | Reads the database only; no HTTP-layer coverage |
 
-**No live WorkOS check has been performed** — no development configuration is
-present (`.env.dashboard` absent, `VESPERS_WORKOS_*` unset), so every live item
-is *blocked*, not passed. Mocks establish our verification logic, not live
-compatibility; manual setup instructions are in the README. Token revocation
-remains unimplemented by design: revocation here is application access, and an
-already-issued access token stays cryptographically valid until it expires.
+Cleanup batch (2026-09-16): setup instructions no longer overwrite an existing
+`.env`/`.env.migrations`; the host migration example uses the published port
+`5433`; `.env.dashboard` is the single source for the dashboard's WorkOS values,
+which `compose.yaml` no longer shadows; the dashboard refuses to offer sign-in
+under `VESPERS_ENVIRONMENT=production` without an HTTPS callback URL; the
+`wrong-issuer` rejection is a fixed label on both the response and the log;
+SQLSTATE 22023 maps to `400 invalid-identity-input` rather than a generic
+`503`; callback and retry provisioning failures emit sanitized diagnostics
+instead of vanishing; and stale claims about default privileges and WorkOS
+integration status were corrected.
 
-- [x] Configure WorkOS AuthKit for the Next.js dashboard, with separate environment configuration and callback/logout URLs; pin and verify SDK versions during implementation. Pinned `@workos-inc/authkit-nextjs` 4.3.2 / `@workos-inc/node` 10.13.0; a real sign-in is still unverified pending manual setup.
+**Live evidence, classified.** An audit on 2026-09-16 read the running
+development environment's logs and database. That evidence **directly observed**
+allowed-user backend provisioning (`POST /api/account/provision` → 200, then
+`GET /api/account` → 200) and the resulting subject-bound user, tenant and
+membership at migration `0004`. It **supports by inference** the access-token
+validation and WorkOS User Management lookup those responses require. It does
+**not** establish the browser authorization-code exchange, callback execution,
+refresh, or logout — a successful backend request says nothing about how the
+token reached the BFF.
+
+Still **unverified**: valid-but-unallowlisted denial in the browser, anonymous
+direct-API `401` (a different check from that denial), session refresh, logout,
+and established-session revocation through a live browser session. The
+[manual verification checklist](README.md#manual-verification-checklist) covers
+each one and is pending; see
+[authentication](docs/authentication.md#live-evidence) for the full matrix and
+its limits. Token revocation remains unimplemented by design: revocation here is
+application access, and an already-issued access token stays cryptographically
+valid until it expires.
+
+- [x] Configure WorkOS AuthKit for the Next.js dashboard, with separate environment configuration and callback/logout URLs; pin and verify SDK versions during implementation. Pinned `@workos-inc/authkit-nextjs` 4.3.2 / `@workos-inc/node` 10.13.0. Allowed-user backend provisioning is evidenced live; the browser exchange, refresh and logout are not — see the live-evidence matrix.
 - [x] Implement verified-email authentication using WorkOS AuthKit. `email_verified` comes from the WorkOS Management API keyed by the verified `sub`, never from the browser.
 - [x] Validate authentication server-side in FastAPI and resolve the authenticated WorkOS user to local users, tenants, and memberships; never trust client-supplied tenant identity.
 - [x] Enforce the allowlist server-side, including direct signup API requests and WorkOS callback/session entry points; successful WorkOS sign-in alone must not grant application access.

@@ -53,7 +53,7 @@ from the URL shape.
 | --- | --- | --- |
 | Key-set endpoint | `${baseURL}/sso/jwks/${clientId}` | `@workos-inc/node` 10.13.0 `getJwksUrl()`; `authkit-nextjs` 4.3.2 calls it with `WORKOS_CLIENT_ID` |
 | Are keys client-specific? | **Yes** — WorkOS signs with a key set unique to the client id | [WorkOS: verifying access tokens](https://workos.com/blog/verify-workos-access-tokens-in-your-own-api) |
-| `iss` | `https://api.workos.com/` (AuthKit sessions guide) or `https://api.workos.com` (API reference); **changes with a custom auth domain** and should be read from configuration | WorkOS docs |
+| `iss` | Derived by default as `{api_base}/user_management/{client_id}`, which is what environments created since mid-2025 issue. Both WorkOS documentation pages still show the bare origin, which legacy environments issue; a custom auth domain changes it again. Override with `VESPERS_WORKOS_ISSUERS`. | WorkOS docs + AuthKit SDK issuer-config changes |
 | `aud` | **Absent** on AuthKit session tokens; addable through a JWT template; present natively on OAuth/MCP tokens | WorkOS docs |
 | Required claims | `sub`, `sid`, `iss`, `exp`, `iat`; `org_id`/`role`/`permissions` when applicable | WorkOS docs |
 | Algorithm | Asymmetric, `RS256` allowlisted; `HS*`/`none` refused at configuration time | pinned config |
@@ -65,11 +65,14 @@ verification here.
 
 Three consequences are configured deliberately:
 
-- **Issuer.** Because WorkOS's own documentation spells the value both with and
-  without a trailing slash, and because a custom auth domain changes it,
-  `VESPERS_WORKOS_ISSUERS` is a list and each entry is accepted in both
-  spellings of the same origin. A different origin — including
-  `https://api.workos.com.evil.test/` — is refused.
+- **Issuer.** `VESPERS_WORKOS_ISSUERS` is a list, and each entry is accepted with
+  and without a trailing slash because WorkOS's own documentation spells one
+  value both ways. Left empty it derives
+  `{api_base}/user_management/{client_id}`. Any other value — including
+  `https://api.workos.com.evil.test/…` and the bare origin the documentation
+  shows — is refused, which makes the issuer a second application-binding check
+  alongside the per-client key set. A legacy WorkOS environment or a custom auth
+  domain issues something else and must set this explicitly.
 - **Audience.** Off by default, because AuthKit session tokens carry none. If a
   JWT template adds one, set `VESPERS_WORKOS_AUDIENCE` and it is enforced. A
   token that carries an `aud` while none is configured is **refused**
@@ -87,11 +90,15 @@ This validation is strictly stricter than the SDK's own `verifyAccessToken`,
 which checks the signature alone.
 
 **Proven offline:** every rule above, against genuinely signed RSA/EC tokens with
-locally generated keys. **Requires a real token:** that a live WorkOS token
-actually carries the `iss`, `kid` and algorithm this configuration expects. A
-trailing-slash or custom-domain mismatch would surface as `401 wrong-issuer`;
-reading the `iss` from one decoded token is the fix, and the setting exists for
-it. Bearer tokens are never logged, printed or persisted.
+locally generated keys.
+
+A mismatch surfaces as `401 wrong-issuer` — a **fixed label**, on the response
+and in the log alike. The presented `iss` is deliberately not echoed: it is
+signature-verified, so it is authentic, but it is still content an attacker
+chooses, and this endpoint answers unauthenticated callers. To find the value
+your environment actually issues, read it from the WorkOS dashboard rather than
+from our error text, and set `VESPERS_WORKOS_ISSUERS`. Bearer tokens are never
+logged, printed or persisted.
 
 ## Session lifecycle
 
@@ -115,7 +122,7 @@ each time. Nothing is cached in the session or the token.
 | `users.status = 'disabled'` | **Next request** refused `403 identity-disabled` | `find_user` status check, and `app.list_memberships` |
 | `tenants.status = 'disabled'` | **Next request** refused `403 no-active-membership` | `app.list_memberships` joins and filters tenant status |
 | `memberships.status = 'disabled'` | **Next request** refused `403 no-active-membership` | `app.list_memberships` filters membership status |
-| Upstream email changed at WorkOS | Reconciled at the **next provisioning call**, not per request. The new address must itself be allowlisted or the change is refused. | `app.provision_personal_identity` |
+| Upstream email changed at WorkOS | Reconciled at the **next provisioning call**, which may be a long way off — see below. The new address must itself be allowlisted or the change is refused. | `app.provision_personal_identity` |
 
 Provisioning enforces the same conditions and additionally refuses a disabled
 tenant or membership rather than silently reactivating one, so `POST
@@ -143,6 +150,12 @@ that would trust the token without calling us.
 6. Active membership, else `403 no-active-membership`.
 7. A requested `tenant_id` must match a verified membership, else
    `403 tenant-not-permitted` — never a silent fallback to a different tenant.
+
+Failures are kept in distinct classes so none of them can be mistaken for
+another: `400 invalid-identity-input` for identity values the bootstrap surface
+refuses (SQLSTATE 22023), `403` for every policy denial, `409` for a terminal
+identity conflict, `502` for an unusable WorkOS response, and
+`503 provisioning-unavailable` reserved for an **unexpected** database failure.
 
 **A successful WorkOS sign-in grants nothing on its own.** Steps 4–6 live in the
 database, so a direct API call cannot bypass what the dashboard displays.
@@ -197,9 +210,32 @@ email being presented, *and* on every protected request against the stored
 verified email. See the revocation table above for the exact effect of each
 change.
 
-**Email change.** The new address must itself be allowlisted, otherwise the
-change is refused. This is deliberate for a one-account MVP: it stops an upstream
-email change from moving an account onto an address nobody approved.
+### Upstream email changes: the exact policy
+
+Traced through both routes, because the difference matters:
+
+| Route | Calls WorkOS? | Address used for the allowlist check |
+| --- | --- | --- |
+| `GET /api/account` (every protected read) | **No** | the address **stored** locally for the verified subject |
+| `POST /api/account/provision` | Yes | the address WorkOS returns **now** |
+
+So an email changed upstream has **no effect on access** until provisioning runs
+again — and provisioning runs only at sign-in and from the account page's retry
+button, so that can be a long time. Access continues under the stored,
+allowlisted address in the meantime.
+
+This is deliberate, and it is not a revocation gap:
+
+- Authorization is keyed to the verified `sub`. An address the user can change
+  upstream is precisely what must *not* grant access.
+- An administrator revokes by removing the **stored** address from the allowlist,
+  or by disabling the user, tenant or membership. All four bite on the next
+  request, whatever WorkOS now believes the address to be.
+- When provisioning does run, the new address must itself be allowlisted or the
+  change is refused — an upstream change cannot move an account onto an address
+  nobody approved.
+
+There is no automatic merging, no subject reassignment, and no account recovery.
 
 ## CSRF
 
@@ -226,25 +262,70 @@ restart**. It is **not shared** across containers or machines. It bounds
 accidental retry storms and trivial scripted abuse without adding Redis. It is
 not a defence against a distributed attacker and not a quota system.
 
-## Cookie security
+## Cookie security, and the production HTTPS guard
 
-The SDK sets the session cookie `HttpOnly` with `SameSite=Lax` and marks it
-`Secure` for `https://` redirect URIs. `http://localhost` is the development
-exception and works only because the redirect URI is explicitly `http://`. In
-production, `VESPERS_ENVIRONMENT=production` refuses to start without a WorkOS
-client id, API key, an HTTPS API base and an HTTPS issuer.
+The SDK sets the session cookie `HttpOnly` with `SameSite=Lax`, and marks it
+`Secure` **from the scheme of `NEXT_PUBLIC_WORKOS_REDIRECT_URI` alone**. An
+`http://` redirect URI therefore does not merely downgrade a redirect: it ships
+the sealed session cookie without `Secure`.
+
+Both halves of the deployment are guarded, using the same
+`VESPERS_ENVIRONMENT` value:
+
+| Half | Guard | Where |
+| --- | --- | --- |
+| FastAPI | `production` refuses to start without a WorkOS client id, API key, an HTTPS API base and HTTPS issuers | `backend/config.py`, `safe_auth_configuration` |
+| Next.js | `production` refuses to *offer sign-in* unless the redirect URI is `https://` | `apps/dashboard/lib/auth-config.ts`, `authConfigProblem` |
+
+`NODE_ENV` is not the discriminator and must not become one: the documented local
+workflow is `docker compose up`, and `apps/dashboard/Dockerfile` serves a
+standalone build with `NODE_ENV=production` on a laptop. Nor is the hostname:
+`http://localhost` is refused under `VESPERS_ENVIRONMENT=production`, because a
+hostname is not evidence about the deployment. Plain HTTP is permitted only under
+the explicit local-development policy — `development` or `test`.
+
+When the guard rejects a configuration, `/auth/sign-in` returns
+`503 redirect-uri-not-https` and `/account` renders "Sign-in unavailable" with
+that same fixed label. The labels name a class of misconfiguration and never a
+configured value.
 
 ## Fail-closed when unconfigured
 
 With no WorkOS configuration, protected routes return
 `503 authentication-not-configured`, the dashboard renders "sign-in unavailable",
-and `/health/live`, `/health/ready` and the whole offline test suite keep working.
-CI builds the dashboard with no WorkOS variables at all.
+and `/health/live`, `/health/ready`, the dashboard's `/api/health` and the whole
+offline test suite keep working. CI builds the dashboard with no WorkOS variables
+at all. An unconfigured checkout is a supported state, not an error.
 
-## What is NOT verified
+## Live evidence
 
-**No real WorkOS sign-in has been performed.** Every test uses synthetic
-identities, locally generated RSA/EC keys and mocked WorkOS HTTP responses. Token
-validation is exercised against genuinely signed tokens — the validator itself is
-never mocked — but that establishes our verification logic, not live WorkOS
-compatibility. See "Manual setup" in the README for what is still required.
+Every automated test in this repository uses synthetic identities, locally
+generated RSA/EC keys and mocked WorkOS HTTP responses. Token validation runs
+against genuinely signed tokens — the validator is never mocked — but that
+establishes *our* verification logic, not live WorkOS compatibility.
+
+Separately, an audit on 2026-09-16 read the running development environment's
+logs and database. What that does and does not establish, classified:
+
+| Behaviour | Classification | Basis |
+| --- | --- | --- |
+| Allowed-user backend provisioning | **Directly observed live** | `POST /api/account/provision` → `200`, then `GET /api/account` → `200`, in the development API log |
+| Allowed-user account state in PostgreSQL | **Directly observed live** | One allowlist row, one user with a bound `external_id`, one tenant, one membership, at migration `0004`, with `created_at == updated_at` (created by provisioning, not by owner insert plus `bind-subject.sql`) |
+| Access-token validation against the live JWKS, with the derived client-scoped issuer | **Inferred** from the above | A `200` from that route is unreachable unless the signature, issuer, expiry and `sub` checks all passed against a real token |
+| WorkOS User Management lookup returning a verified email | **Inferred** from the above | Provisioning requires `email_verified: true` from that call |
+| Browser authorization-code exchange, callback execution, sealed-cookie round trip | **Unverified** | A successful backend request does not prove how the token reached the BFF. The callback's own provisioning `POST` was *not* present in that log; the observed `403` → retry → `200` sequence is consistent with the callback having failed earlier against the pre-correction issuer |
+| Valid but unallowlisted identity denied | **Unverified** | No such sign-in observed |
+| Anonymous direct API `401` | **Unverified** | Not observed. This is a **different** check from the row above: it proves the API demands its own credential, not that an authenticated identity is refused |
+| Session refresh | **Unverified** | Not observed |
+| Logout, and denial of a protected page afterwards | **Unverified** | Not observed |
+| Established-session application-access revocation | **Verified in disposable PostgreSQL only** | The integration harness removes an allowlist entry and disables a tenant as the migration owner and asserts the next call is refused; no live browser session was exercised |
+| Every rule in "Application binding", "Access control" and "Identity binding rules" | **Verified offline** | 46 offline tests through the real FastAPI dependency chain, plus the disposable-PostgreSQL identity-binding checks |
+
+Two caveats on the observed rows. They depend on the running container's code and
+configuration matching this tree, and this tree has changed since — so they are
+evidence about the code as it stood, and the manual checklist should be re-run
+after deploying this batch. And nothing above was produced by a test this
+repository can re-run; it is a reading of one environment at one moment.
+
+The [manual verification checklist](../README.md#manual-verification-checklist)
+covers every **Unverified** row above. It remains pending.

@@ -57,3 +57,20 @@ def test_log_fields_do_not_copy_arbitrary_payloads() -> None:
     result = JsonFormatter().format(record)
     assert json.loads(result)["task_id"] == "test-task"
     assert "must-not-appear" not in result
+
+
+def test_request_logs_record_the_path_but_never_the_query_string() -> None:
+    """Query strings carry tenant ids; the path is what makes a log readable."""
+    import json
+    import logging
+
+    from backend.logging import JsonFormatter
+
+    record = logging.LogRecord("vespers.api", logging.INFO, __file__, 1, "http_request", None, None)
+    record.method = "GET"
+    record.path = "/api/account"
+    record.status_code = 200
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["method"] == "GET"
+    assert payload["path"] == "/api/account"
+    assert not any("tenant_id" in str(value) for value in payload.values())

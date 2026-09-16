@@ -17,6 +17,7 @@ from backend.identity import (
     EmailAlreadyBound,
     ExternalSubjectConflict,
     IdentityService,
+    InvalidIdentityInput,
     SubjectBindingRequired,
     SubjectRequired,
     TenantRepository,
@@ -269,22 +270,42 @@ def test_the_subject_is_passed_through_stripped() -> None:
     asyncio.run(run())
 
 
+class _Orig(Exception):
+    """Stand-in for a psycopg error: a SQLSTATE plus a revealing message."""
+
+    def __init__(self, sqlstate: str | None, message: str = "") -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
 @pytest.mark.parametrize(
     ("sqlstate", "expected"),
     [
         ("VS001", ExternalSubjectConflict),
         ("VS002", EmailAlreadyBound),
         ("VS003", SubjectBindingRequired),
+        # 22023: missing email or blank subject. Invalid input, not an outage.
+        ("22023", InvalidIdentityInput),
     ],
 )
 def test_conflict_sqlstates_map_to_distinct_typed_errors(
     sqlstate: str, expected: type[Exception]
 ) -> None:
     """Matched by SQLSTATE, never by scraping a message."""
+    assert isinstance(_translate(DBAPIError("SELECT 1", {}, _Orig(sqlstate))), expected)
 
-    class Orig(Exception):
-        def __init__(self) -> None:
-            self.sqlstate = sqlstate
 
-    error = DBAPIError("SELECT 1", {}, Orig())
-    assert isinstance(_translate(error), expected)
+def test_an_unrecognised_sqlstate_stays_a_database_error() -> None:
+    """An outage must not be flattened into a policy decision."""
+    for sqlstate in ("08006", "40001", "57014", None):
+        error = DBAPIError("SELECT 1", {}, _Orig(sqlstate))
+        assert _translate(error) is error
+
+
+def test_translation_never_carries_the_driver_message_forward() -> None:
+    """psycopg messages can echo the statement and its parameters."""
+    secret = "sk_live_synthetic_do_not_echo person@synthetic.invalid"
+    for sqlstate in ("VS001", "VS002", "VS003", "22023", "42501"):
+        translated = _translate(DBAPIError("SELECT 1", {}, _Orig(sqlstate, secret)))
+        assert secret not in str(translated), (sqlstate, translated)
+        assert "sk_live_synthetic_do_not_echo" not in repr(translated)

@@ -10,11 +10,16 @@ agent loop, connected-app actions, schedules, memory and discovery are not imple
 Prerequisites: Git, uv 0.12.14, Node.js 24.19.0 with npm, and Docker with Compose v2.
 Python 3.12 is pinned in `.python-version`; uv can install it automatically.
 
+These create the two local files only when they are absent. Both are Git-ignored
+and may already hold real credentials, so neither command overwrites one:
+
 ```sh
-cp .env.example .env
-cp .env.migrations.example .env.migrations
+[ -f .env ] || cp .env.example .env
+[ -f .env.migrations ] || cp .env.migrations.example .env.migrations
 make install
 docker compose up -d postgres
+# Host-side Alembic; reads .env.migrations and connects on the published port
+# 127.0.0.1:5433. The Compose `migrate` service uses the internal 5432 instead.
 make migrate
 make dev-api
 # In separate terminals:
@@ -138,10 +143,25 @@ Then edit both files and fill in:
 | `.env` | `VESPERS_WORKOS_CLIENT_ID` | the same client ID |
 | `.env` | `VESPERS_WORKOS_API_KEY` | the same secret key |
 
-Compose reads `./.env` for interpolation and passes the two `VESPERS_*` values to
-`api` and `worker`; `.env.dashboard` is loaded by the `dashboard` service only,
-server-side. Nothing here reaches the browser bundle. Keep real values out of
-tracked files, images, command arguments and logs.
+Compose reads `./.env` for `${...}` interpolation and passes the two `VESPERS_*`
+values to `api` and `worker`. `.env.dashboard` is loaded by the `dashboard`
+service as an `env_file`, server-side only, and is the **single source** for the
+five values above: `compose.yaml` deliberately sets none of those keys, because a
+key present in a service's `environment:` silently overrides the same key from
+its `env_file`. Compose does set `VESPERS_API_BASE_URL` and `VESPERS_ENVIRONMENT`
+for the dashboard, and those *do* override the file — they describe container
+topology, not WorkOS configuration.
+
+Nothing here reaches the browser bundle. Keep real values out of tracked files,
+images, command arguments and logs.
+
+**Production requires HTTPS.** With `VESPERS_ENVIRONMENT=production` the
+dashboard refuses to offer sign-in unless `NEXT_PUBLIC_WORKOS_REDIRECT_URI` is
+`https://` — including on `localhost`, because the AuthKit session cookie is
+marked `Secure` from that scheme alone. `/auth/sign-in` then returns
+`503 redirect-uri-not-https` and `/account` says so. Plain HTTP is permitted only
+under `development` or `test`. `NODE_ENV` is not the discriminator: the Compose
+image serves a production Next.js build on your laptop.
 
 **3. Start the stack in order.** `depends_on` enforces this, so a single command
 is enough — Postgres becomes healthy, `migrate` runs to completion as the
@@ -178,32 +198,55 @@ Signing in without this returns `403 not-allowlisted` by design.
 
 **5. Open http://localhost:3000** and sign in.
 
-### Verifying it, without handling a bearer token
+### Manual verification checklist
 
-Never paste an access token into a shell, a chat message or a ticket. These
-checks establish the same facts without one:
+These six checks are **pending**; nothing in the repository records them as done.
+See [authentication](docs/authentication.md#live-evidence) for what *is* evidenced
+and how strongly.
+
+Never paste an access token into a shell, a chat message or a ticket. Nothing
+below needs one: the browser holds an opaque sealed cookie, and the
+database-side decision is readable directly.
 
 ```sh
-# The API requires its own credential and does not trust the dashboard.
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/api/account   # 401
-
 # The backend's authorization decision for an address, read from the database
 # alone — no token, no session, no WorkOS call. Prints the same conditions
 # authorize_local_access re-checks on every protected request.
 docker compose exec -T api python -m backend.identity.access_check you@example.com
 ```
 
-- **Allowed account** — after allowlisting, sign in; `/account` shows your email,
-  personal tenant name and tenant ID. `access_check` prints `Decision: permitted`.
-- **Denied account** — sign in with a second WorkOS user that is *not* on the
-  allowlist. `/account` shows "Access denied" with the backend's own reason
-  string, because the page renders the FastAPI response verbatim rather than
-  making a UI-side decision. `access_check` for that address prints
-  `Decision: DENIED — not-allowlisted`.
-- **Revocation** — remove the allowlist row
-  (`DELETE FROM public.signup_allowlist WHERE email_normalized = '...'` as
-  `vespers_owner`) and reload `/account` **without signing out**. The existing
-  session is refused immediately; it does not wait for the token to expire.
+Use a **second, disposable WorkOS user** for every denial check. Do not remove
+the real account's allowlist entry, disable it, or send invitations.
+
+| # | Check | How | Expected |
+| --- | --- | --- | --- |
+| 1 | Allowed-user sign-in | Sign in at http://localhost:3000 as the allowlisted account | `/account` shows the email, personal tenant name, tenant ID and role; `access_check` prints `Decision: permitted` |
+| 2 | Valid but unallowlisted identity is denied | Sign in as a second WorkOS user that was never allowlisted | `/account` shows "Access denied (not-allowlisted)"; `access_check` for that address prints `Decision: DENIED — not-allowlisted` |
+| 3 | Anonymous direct API call | `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/api/account` | `401` — a *different* check from 2: this proves the API needs its own credential, not that an authenticated identity is refused |
+| 4 | Session refresh | Leave `/account` open past the access-token lifetime (AuthKit default 5 minutes), then reload | The page still renders the account; the proxy refreshed the sealed session without a new sign-in |
+| 5 | Logout | Click "Sign out", then open `/account` again | "Sign in to continue"; the WorkOS session is ended, not merely the local cookie |
+| 6 | Established-session revocation | While signed in, remove the allowlist row as the migration owner, then reload `/account` **without signing out** | "Access denied (not-allowlisted)" on the very next request, not at token expiry |
+
+Check 6 mutates state. Restore it immediately afterwards — the row is
+recreated by the same command used in step 4 of the setup above, and the user,
+tenant and membership rows are never deleted by revocation, so access returns on
+the next request:
+
+Pass bare values here too: psql's `:'name'` form quotes and escapes them itself,
+so a pre-quoted `"'you@example.com'"` would store or match the quotes literally.
+
+```sh
+# Revoke:
+docker compose exec -T postgres psql -U vespers_owner -d vespers_development \
+  -v ON_ERROR_STOP=1 -v email=you@example.com <<'SQL'
+DELETE FROM public.signup_allowlist WHERE email_normalized = lower(btrim(:'email'));
+SQL
+
+# Restore:
+docker compose exec -T postgres psql -U vespers_owner -d vespers_development \
+  -v ON_ERROR_STOP=1 -v email=you@example.com -v note='first account' \
+  < infra/allowlist-add.sql
+```
 
 See [authentication](docs/authentication.md) for the trust boundary, the full
 revocation table, application binding of the token, identity-binding rules, and
@@ -216,9 +259,15 @@ what remains unverified.
 DELETE grant on any of them and cannot read the allowlist at all.
 
 Existing development databases need only `make migrate`; the migration is additive
-and creates no data. It revokes the broad DML that `infra/init-db.sql` default
-privileges would otherwise grant, then re-grants narrowly, so **any future table
-must repeat that revoke/re-grant step**.
+and creates no data.
+
+Fresh initialization grants the runtime role **nothing** on a new table:
+`infra/init-db.sql` sets no default privileges, and migration `0003` revokes the
+permissive ones it used to set on databases created before that change. Migration
+`0002` still revokes and re-grants explicitly, because it predates `0003` and ran
+against databases that had them. **Any future table must grant the runtime role
+its access explicitly** — the absence of default privileges is what makes that a
+deliberate act rather than something a migration can forget.
 
 Add the first account to the allowlist through the administrative path, as the
 migration owner (see step 4 above). There is deliberately no API for this, and

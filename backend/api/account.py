@@ -15,9 +15,19 @@ from a request header, query parameter or JSON body.
 request, not only at sign-in, and re-reads the allowlist, the user status, the
 tenant status and the membership status from PostgreSQL each time. An existing
 browser session therefore cannot outlive revoked application access: the next
-request it makes is refused. Step 2 is skipped on read paths, so an *upstream*
-email change is reconciled at provisioning rather than per request; the allowlist
-is checked against the stored verified email in between.
+request it makes is refused.
+
+**Upstream email changes are a separate, slower path, on purpose.** Step 2 is
+skipped on read paths, so `GET /api/account` never calls WorkOS and the allowlist
+is always evaluated against the email *stored* locally for the verified subject.
+A change made at WorkOS is reconciled only by `POST /api/account/provision`,
+which in this application runs at sign-in and from the account page's retry
+button — so it may not run for a long time. Access therefore continues under the
+stored, allowlisted address until then. This does not weaken revocation: an
+administrator revokes by removing the *stored* address from the allowlist (or
+disabling the user, tenant or membership), and that bites on the next request.
+Deriving authorization from an email the user can change upstream is exactly the
+property we do not want; the verified subject is the identity.
 
 This is application-access revocation, which is deliberately distinct from
 cryptographic token validity: an issued access token stays verifiable until it
@@ -43,6 +53,7 @@ from backend.identity import (
     ExternalSubjectConflict,
     IdentityDisabled,
     IdentityService,
+    InvalidIdentityInput,
     SignupNotAllowed,
     SubjectBindingRequired,
     SubjectRequired,
@@ -244,8 +255,15 @@ async def provision_account(
     except SubjectRequired:
         # Unreachable through this route: `subject` is the verified token claim.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing-claim:sub") from None
+    except InvalidIdentityInput:
+        # SQLSTATE 22023 from the bootstrap surface: the identity values were
+        # refused. That is a bad request, not an outage, and reporting it as
+        # "provisioning-unavailable" would send an operator hunting a database
+        # they have no reason to suspect.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid-identity-input") from None
     except (SQLAlchemyError, RateLimited):
-        # A storage failure must not be reported as successful provisioning.
+        # An *unexpected* storage failure, kept distinct from every decision
+        # above, and never reported as successful provisioning.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "provisioning-unavailable") from (
             None
         )

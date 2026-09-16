@@ -8,14 +8,14 @@
 import { getSignInUrl } from "@workos-inc/authkit-nextjs";
 import { NextRequest, NextResponse } from "next/server";
 import { safeReturnPath } from "../../../lib/redirects";
-import { isConfigured } from "../../../lib/config";
+import { authConfigProblem } from "../../../lib/config";
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  if (!isConfigured()) {
-    return NextResponse.json(
-      { error: "authentication-not-configured" },
-      { status: 503 },
-    );
+  // Fixed label, so a rejected production configuration is diagnosable without
+  // exposing any configured value.
+  const problem = authConfigProblem();
+  if (problem !== null) {
+    return NextResponse.json({ error: problem }, { status: 503 });
   }
   // Redirect policy applied before the value can influence any redirect.
   const returnPathname = safeReturnPath(

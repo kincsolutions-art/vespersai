@@ -60,6 +60,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "http_request",
             extra={
                 "request_id": request_id,
+                "method": request.method,
+                # Path only. The query string carries tenant ids, and a log line
+                # is not the place for them.
+                "path": request.url.path,
                 "status_code": response.status_code,
                 "duration_ms": round((monotonic() - started) * 1000, 2),
             },

@@ -1,17 +1,33 @@
 /**
  * Server-only configuration. Never import from a Client Component: it reads
  * secrets and the internal API base that the browser must not see.
+ *
+ * The authentication policy itself lives in `./auth-config`, which `proxy.ts`
+ * imports too, so the proxy and the pages cannot disagree about whether sign-in
+ * is permitted.
  */
 import "server-only";
+import { authConfigProblem } from "./auth-config";
 
+export {
+  appOrigin,
+  authConfigProblem,
+  deploymentEnvironment,
+} from "./auth-config";
+export type { AuthConfigProblem, Environment } from "./auth-config";
+
+/**
+ * Where the dashboard reaches FastAPI. Under Compose this is the service name on
+ * the internal network and is set in `compose.yaml`, deliberately *not* in
+ * `.env.dashboard`: it describes container topology, not operator configuration.
+ * The default matches Compose so a missing value cannot silently point the BFF
+ * somewhere else.
+ */
 export const API_BASE = process.env.VESPERS_API_BASE_URL ?? "http://api:8000";
 
+/** True only when sign-in may be offered; see `authConfigProblem`. */
 export function isConfigured(): boolean {
-  return Boolean(
-    process.env.WORKOS_CLIENT_ID &&
-    process.env.WORKOS_API_KEY &&
-    process.env.WORKOS_COOKIE_PASSWORD,
-  );
+  return authConfigProblem() === null;
 }
 
 /**

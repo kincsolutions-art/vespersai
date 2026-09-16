@@ -37,3 +37,14 @@ class SubjectBindingRequired(IdentityError):
     migration owner. Binding is a deliberate administrative act
     (`infra/bind-subject.sql`), never an automatic consequence of signing in.
     """
+
+
+class InvalidIdentityInput(IdentityError):
+    """The bootstrap surface refused the identity values it was handed.
+
+    Raised for SQLSTATE 22023, which `app.provision_personal_identity` uses for a
+    missing email or a blank verified subject. The Python guard in
+    `IdentityService` rejects both before a transaction opens, so this is
+    defence in depth for a direct or future caller — but it is an *invalid
+    argument*, not an outage, and must not be reported as one.
+    """

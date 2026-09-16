@@ -17,6 +17,7 @@ from backend.identity.errors import (
     EmailAlreadyBound,
     ExternalSubjectConflict,
     IdentityDisabled,
+    InvalidIdentityInput,
     SignupNotAllowed,
     SubjectBindingRequired,
     SubjectRequired,
@@ -85,6 +86,7 @@ _LIST_MEMBERSHIPS = text(
 
 # SQLSTATEs raised deliberately by app.provision_personal_identity (migrations 0003/0004).
 _INSUFFICIENT_PRIVILEGE = "42501"
+_INVALID_ARGUMENT = "22023"
 _SUBJECT_CONFLICT = "VS001"
 _EMAIL_CONFLICT = "VS002"
 _BINDING_REQUIRED = "VS003"
@@ -168,8 +170,19 @@ class IdentityService:
 
 
 def _translate(error: DBAPIError) -> Exception:
+    """Map deliberate SQLSTATEs to typed domain errors.
+
+    Matched by SQLSTATE only. The driver message is consulted for exactly one
+    disambiguation and is never carried into the returned error, because it can
+    contain the statement and its parameters. Anything unrecognised is returned
+    unchanged, so an unexpected database failure stays a database failure rather
+    than being flattened into a policy decision.
+    """
     sqlstate = getattr(getattr(error, "orig", None), "sqlstate", None)
     message = str(getattr(error, "orig", ""))
+    if sqlstate == _INVALID_ARGUMENT:
+        # A missing email or a blank subject. Invalid input, not an outage.
+        return InvalidIdentityInput("identity values were rejected by the bootstrap surface")
     if sqlstate == _SUBJECT_CONFLICT:
         return ExternalSubjectConflict("email belongs to a different external subject")
     if sqlstate == _EMAIL_CONFLICT:

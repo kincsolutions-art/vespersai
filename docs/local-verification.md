@@ -8,15 +8,20 @@ only the validated scheme to `postgresql://`. Configuration errors name fields a
 corrective requirements, never their values or original exception chain.
 
 Host development uses `.env` for API/worker and `.env.migrations` for Alembic.
-Copy the corresponding `.example` files. Do not export migration credentials into
+Create them from the corresponding `.example` files only when absent
+(`[ -f .env ] || cp .env.example .env`); both may already hold real credentials.
+`.env.migrations` targets the port Compose publishes to the host
+(`127.0.0.1:5433`), not the container-internal `5432` the `migrate` service uses. Do not export migration credentials into
 API/worker shells. Compose supplies `VESPERS_MIGRATION_DATABASE_URL` only to migrate.
-Runtime `vespers_app` has CONNECT, schema USAGE, and the default-privilege table
-grants from `infra/init-db.sql`. It has no ownership, role membership, DDL,
-superuser, BYPASSRLS, or inheritance privileges. `vespers_owner` owns app objects;
+Runtime `vespers_app` has CONNECT and schema USAGE, plus whatever a migration has
+granted it explicitly. `infra/init-db.sql` sets no default privileges, so a new
+migration-owned table grants it nothing (see migration `0003`). It has no
+ownership, role membership, DDL, superuser, BYPASSRLS, or inheritance privileges. `vespers_owner` owns app objects;
 `vespers_dbos` owns only the separate DBOS database.
 
-Migration `0002` narrows this for the tenant foundations: it revokes the broad
-default-privilege DML and re-grants only SELECT on `users` and `memberships`,
+Migration `0002` narrows this for the tenant foundations: it revokes the broad DML
+that the *historical* `init-db.sql` default privileges granted, and re-grants only
+SELECT on `users` and `memberships`,
 SELECT plus column-level `UPDATE (name, updated_at)` on `tenants`, nothing at all
 on `signup_allowlist`, and EXECUTE on the bootstrap functions (seven after
 migration `0004`: five SECURITY DEFINER, two SECURITY INVOKER). See
@@ -67,8 +72,8 @@ docker compose up --build -d --wait
 ```
 
 Copy the example only if `.env.migrations` does not already contain your configuration.
-The transition preserves rows and objects, transfers ownership, and sets grants/default
-privileges. It can be repeated; the integration harness verifies data preservation on
+The transition preserves rows and objects, transfers ownership, and sets explicit
+grants; it sets no default privileges. It can be repeated; the integration harness verifies data preservation on
 two applications. It rejects the wrong database, other database ownership, or remaining
 indirect owner membership. Custom role layouts require review; this is not a production
 credential migration. No existing database was modified during this batch.

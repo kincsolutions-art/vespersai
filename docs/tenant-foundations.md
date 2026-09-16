@@ -90,9 +90,14 @@ The runtime role holds no grant and no policy on `signup_allowlist`, so there is
 no API surface for it by construction. Use `infra/allowlist-add.sql` as the
 migration owner:
 
+Pass **bare** values. `infra/allowlist-add.sql` uses psql's `:'name'` form, which
+quotes and escapes the value itself; a pre-quoted `"'person@example.com'"` stores
+the quotes as part of the address, and the account then fails `403
+not-allowlisted` against an allowlist row that looks correct.
+
 ```sh
 docker compose exec -T postgres psql -U vespers_owner -d vespers_development \
-  -v ON_ERROR_STOP=1 -v email="'person@example.com'" -v note="'first account'" \
+  -v ON_ERROR_STOP=1 -v email=person@example.com -v note='first account' \
   < infra/allowlist-add.sql
 ```
 
@@ -164,10 +169,12 @@ takes a tenant id**, so a request payload cannot widen or redirect the boundary.
 `rename_tenant` deliberately issues an unfiltered `UPDATE`: row-level security is
 the authority, and a redundant `WHERE` would let a broken policy pass the tests.
 
-## Identity facts a future authentication adapter must supply
+## Identity facts the authentication adapter supplies
 
-Out of scope here; WorkOS is not integrated. When it is, the adapter must provide,
-from a **verified** session and never from a request payload:
+WorkOS AuthKit **is** integrated and implements this contract; see
+[authentication](authentication.md). The contract is stated here because it binds
+any adapter, not because one is hypothetical. From a **verified** session, never
+from a request payload:
 
 - a stable external subject identifier → `users.external_id`, **required**;
 - a **verified** email address → `users.email`;
@@ -176,16 +183,22 @@ from a **verified** session and never from a request payload:
 
 A successful sign-in alone must not grant access: `app.provision_personal_identity`
 still enforces the allowlist, and `resolve_membership` still enforces status.
-WorkOS AuthKit is now wired to exactly this contract; see
-[authentication](authentication.md).
 
 ## Migration and runtime-role separation
 
-`infra/init-db.sql` sets `ALTER DEFAULT PRIVILEGES` granting full DML on new
-tables to `vespers_app`, so migration 0002 **revokes everything and re-grants
-narrowly**. Adding a table without that revoke would silently hand runtime full
-DML. Grants are wrapped in a `DO` block that skips them with a notice when the
-role is absent, keeping the migration portable.
+**Currently:** `infra/init-db.sql` sets no default privileges, so a new
+migration-owned table grants `vespers_app` nothing at all. Every table must grant
+its access explicitly.
+
+**Historically:** `init-db.sql` did set `ALTER DEFAULT PRIVILEGES` granting full
+DML on new tables to `vespers_app`. That is why migration `0002` **revokes
+everything and re-grants narrowly** — it ran against databases that had those
+defaults, and its revoke is still correct for them. Migration `0003` removed the
+defaults outright (see below). Do not read `0002`'s revoke as evidence that fresh
+initialization still grants anything.
+
+Grants are wrapped in a `DO` block that skips them with a notice when the role is
+absent, keeping the migration portable.
 
 DBOS system storage is untouched: no application tables, no `app` schema, no
 policies. Application RLS assumptions are never imposed on DBOS internals.

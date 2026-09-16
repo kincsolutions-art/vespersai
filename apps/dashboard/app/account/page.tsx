@@ -1,6 +1,7 @@
 import Link from "next/link";
+import { revalidatePath } from "next/cache";
 import { withAuth, signOut } from "@workos-inc/authkit-nextjs";
-import { API_BASE, isConfigured } from "../../lib/config";
+import { API_BASE, authConfigProblem } from "../../lib/config";
 
 export const dynamic = "force-dynamic";
 
@@ -41,13 +42,56 @@ async function loadAccount(
   }
 }
 
+/**
+ * Re-runs first-sign-in provisioning.
+ *
+ * The callback already attempts this, but cannot fail sign-in over it: a backend
+ * blip would then lock the user out entirely. It logs the failure instead.
+ * Without this retry, one failed attempt strands the account at
+ * `not-provisioned` until the user happens to sign out and back in.
+ * The backend re-validates the token and re-reads the verified email from
+ * WorkOS, so this asserts no identity of its own and grants nothing extra.
+ */
+async function provisionAccount(): Promise<void> {
+  const { accessToken } = await withAuth();
+  if (!accessToken) return;
+  try {
+    const response = await fetch(`${API_BASE}/api/account/provision`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      // Status and a fixed category only. The page below re-reads the real
+      // state, so nothing here claims the retry worked.
+      console.warn(
+        JSON.stringify({
+          event: "retry_provisioning_rejected",
+          status: response.status,
+        }),
+      );
+    }
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "retry_provisioning_unreachable",
+        reason: error instanceof Error ? error.name : "unknown",
+      }),
+    );
+  }
+  revalidatePath("/account");
+}
+
 export default async function AccountPage() {
-  if (!isConfigured()) {
+  // Fixed label, never a value: this page is reachable without signing in.
+  const problem = authConfigProblem();
+  if (problem !== null) {
     return (
       <main className="auth">
         <h1>Sign-in unavailable</h1>
         <p>
-          WorkOS is not configured on this server. See docs/authentication.md.
+          Authentication is not usable on this server (<code>{problem}</code>).
+          See docs/authentication.md.
         </p>
       </main>
     );
@@ -55,10 +99,13 @@ export default async function AccountPage() {
 
   const { user, accessToken } = await withAuth();
   if (!user || !accessToken) {
+    // Deliberately neutral: this branch covers "never signed in" and "session
+    // expired" alike, and the server cannot tell them apart. Claiming the
+    // session ended sends someone hunting for a cookie problem they don't have.
     return (
       <main className="auth">
-        <h1>Your session has ended</h1>
-        <p>Sign in again to reach your account.</p>
+        <h1>Sign in to continue</h1>
+        <p>You are not signed in, or your session has expired.</p>
         <Link className="button" href="/auth/sign-in?return_to=/account">
           Sign in
         </Link>
@@ -84,6 +131,23 @@ export default async function AccountPage() {
           <dt>Role</dt>
           <dd>{account.role}</dd>
         </dl>
+      ) : status === 403 && detail === "not-provisioned" ? (
+        <>
+          <h2>Setup incomplete</h2>
+          <p>
+            You are signed in, but your account was never created here. That
+            happens when the one-time setup step fails during sign-in. Retrying
+            is safe: it is idempotent, and it still enforces the allowlist.
+          </p>
+          <form
+            action={async () => {
+              "use server";
+              await provisionAccount();
+            }}
+          >
+            <button type="submit">Finish setup</button>
+          </form>
+        </>
       ) : status === 403 ? (
         <>
           <h2>Access denied</h2>
